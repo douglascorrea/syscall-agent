@@ -21,9 +21,34 @@ export BRAVE_SEARCH_API_KEY=...
 ./build/agent -s 20 -m anthropic/claude-3.5-sonnet "find the largest .c file and tell me what it does"
 echo "what is in MEMORY.md?" | ./build/agent
 
+# interactive TUI
+./build/agent --tui
+./build/agent --tui "summarize this repository"
+
 # enable subprocess tools (default sandbox: read-only FS, no network)
 ./build/agent --allow-exec "run 'git log -n 5 --oneline' and summarize"
 ```
+
+## TUI mode
+
+`--tui` starts a minimal full-screen terminal UI with:
+
+- a multi-turn transcript
+- a single-line composer
+- a live activity pane for steps and tool calls
+- a status/footer bar with model and mode
+
+Keyboard controls:
+
+- `Enter` — send the current prompt
+- `PgUp` / `PgDn` — scroll the transcript
+- `Ctrl-C` / `Ctrl-D` — quit (or queue exit after the current response)
+
+Notes:
+
+- The first version is intentionally dependency-free: ANSI rendering + raw TTY mode, no `ncurses`.
+- The UI shows request phases and tool activity, but responses are still non-streaming because OpenRouter is currently used in non-streaming mode.
+- If `--tui` is used in a non-TTY environment, it falls back to the normal one-shot CLI behavior.
 
 ## Files
 
@@ -86,6 +111,7 @@ Applied between `fork()` and `execvp()` via `sandbox_init(3)` on macOS (Linux is
 ```
 -s / --steps N        max agent-loop iterations (default 10)
 -m / --model NAME     OpenRouter model id (default openai/gpt-4o-mini)
+--tui                 launch the interactive terminal UI
 --system PATH         path to SYSTEM_PROMPT.md
 --memory PATH         path to MEMORY.md
 --allow-exec          enable exec_command, spawn_bg, bg_read, bg_kill, bg_list
@@ -100,8 +126,9 @@ Applied between `fork()` and `execvp()` via `sandbox_init(3)` on macOS (Linux is
 ```
 src/
   main.c                 # CLI entry + flag parsing
-  agent.c                # agent loop, message history, timing metadata
+  agent.c                # session runtime, agent loop, timing metadata, event hooks
   openrouter.c           # OpenRouter chat completions client
+  tui.c                  # ANSI/TTY terminal UI
   tools.c                # tool registration + top-level dispatch
   tools_fs.c             # stat, list_dir, write_file, read_file_range
   tools_proc.c           # exec_command, spawn_bg/read/kill/list, list_processes

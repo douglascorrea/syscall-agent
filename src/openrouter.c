@@ -9,7 +9,10 @@
 cJSON *openrouter_chat(const char *api_key,
                        const char *model,
                        cJSON *messages,
-                       cJSON *tools) {
+                       cJSON *tools,
+                       char **err_out) {
+    if (err_out) *err_out = NULL;
+
     cJSON *req = cJSON_CreateObject();
     cJSON_AddStringToObject(req, "model", model);
     /* Share the references — we'll Detach before deleting req to avoid double-free. */
@@ -41,18 +44,25 @@ cJSON *openrouter_chat(const char *api_key,
     buf_free(&auth);
 
     if (r.error) {
-        fprintf(stderr, "openrouter: transport error: %s\n", r.error);
+        if (err_out) {
+            Buf err;
+            buf_init(&err);
+            buf_printf(&err, "transport error: %s", r.error);
+            *err_out = err.data;
+        }
         http_response_free(&r);
         return NULL;
     }
 
     cJSON *resp = r.body ? cJSON_Parse(r.body) : NULL;
     if (!resp) {
-        fprintf(stderr, "openrouter: invalid JSON response (HTTP %ld): %.500s\n",
-            r.status, r.body ? r.body : "(empty)");
-    } else if (r.status >= 400) {
-        fprintf(stderr, "openrouter: HTTP %ld\n", r.status);
-        /* leave error info embedded in resp for caller to inspect */
+        if (err_out) {
+            Buf err;
+            buf_init(&err);
+            buf_printf(&err, "invalid JSON response (HTTP %ld): %.500s",
+                r.status, r.body ? r.body : "(empty)");
+            *err_out = err.data;
+        }
     }
     http_response_free(&r);
     return resp;

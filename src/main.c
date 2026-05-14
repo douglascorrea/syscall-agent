@@ -1,5 +1,6 @@
 #include "agent.h"
 #include "http.h"
+#include "tui.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -19,6 +20,7 @@ static void usage(const char *argv0) {
         "  -s, --steps N         Max agent-loop iterations (default 10)\n"
         "  -m, --model NAME      OpenRouter model id (default openai/gpt-4o-mini\n"
         "                        or $OPENROUTER_MODEL)\n"
+        "      --tui             Launch the interactive terminal UI\n"
         "      --system PATH     Path to SYSTEM_PROMPT.md (default ./SYSTEM_PROMPT.md\n"
         "                        or $SYSTEM_PROMPT_PATH)\n"
         "      --memory PATH     Path to MEMORY.md (default ./MEMORY.md\n"
@@ -61,6 +63,7 @@ int main(int argc, char **argv) {
     if (cfg.allow_unsafe_exec) cfg.allow_exec = 1;
 
     const char *prompt = NULL;
+    int use_tui = 0;
 
     int i = 1;
     while (i < argc) {
@@ -68,6 +71,9 @@ int main(int argc, char **argv) {
         if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             usage(argv[0]);
             return 0;
+        } else if (strcmp(a, "--tui") == 0) {
+            use_tui = 1;
+            i++;
         } else if (strcmp(a, "-v") == 0 || strcmp(a, "--verbose") == 0) {
             cfg.verbose = 1;
             i++;
@@ -114,7 +120,7 @@ int main(int argc, char **argv) {
     }
 
     char *line = NULL;
-    if (!prompt) {
+    if (!use_tui && !prompt) {
         size_t cap = 0;
         ssize_t n = getline(&line, &cap, stdin);
         if (n <= 0) {
@@ -127,7 +133,7 @@ int main(int argc, char **argv) {
     }
 
     http_global_init();
-    int rc = agent_run(&cfg, prompt);
+    int rc = use_tui ? tui_run(&cfg, prompt) : agent_run(&cfg, prompt);
     http_global_cleanup();
 
     free(line);

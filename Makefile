@@ -3,6 +3,7 @@ CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -D_DAR
 LDFLAGS ?=
 LDLIBS  := $(shell curl-config --libs)
 INCS    := -Isrc -Ivendor $(shell curl-config --cflags)
+THREADS := -pthread
 
 BUILD   := build
 BIN     := $(BUILD)/agent
@@ -18,6 +19,7 @@ SRC := \
   src/main.c \
   src/agent.c \
   src/openrouter.c \
+  src/tui.c \
   src/tools.c \
   src/tools_fs.c \
   src/tools_proc.c \
@@ -37,12 +39,12 @@ all: $(BIN)
 
 $(BIN): $(OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(OBJ) $(LDFLAGS) $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(THREADS) $(OBJ) $(LDFLAGS) $(LDLIBS) -o $@
 	@echo "built $@"
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INCS) -c $< -o $@
+	$(CC) $(CFLAGS) $(THREADS) $(INCS) -c $< -o $@
 
 clean:
 	rm -rf $(BUILD)

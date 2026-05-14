@@ -16,6 +16,7 @@
 cJSON *openrouter_chat(const char *api_key,
                        const char *model,
                        cJSON *messages,
-                       cJSON *tools);
+                       cJSON *tools,
+                       char **err_out);
 
 #endif

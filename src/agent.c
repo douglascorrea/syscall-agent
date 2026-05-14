@@ -11,10 +11,38 @@
 #include <string.h>
 #include <time.h>
 
+struct AgentSession {
+    AgentConfig cfg;
+    cJSON *messages;
+    ToolCtx ctx;
+    cJSON *tools;
+};
+
 static long now_ms(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
+
+static void emit_event(const AgentHooks *hooks,
+                       AgentEventType type,
+                       int step_index,
+                       int max_steps,
+                       const char *message,
+                       const char *tool_name,
+                       const char *tool_args,
+                       long duration_ms) {
+    if (!hooks || !hooks->on_event) return;
+    AgentEvent event = {
+        .type = type,
+        .step_index = step_index,
+        .max_steps = max_steps,
+        .duration_ms = duration_ms,
+        .message = message,
+        .tool_name = tool_name,
+        .tool_args = tool_args,
+    };
+    hooks->on_event(&event, hooks->userdata);
 }
 
 static cJSON *build_system_message(const AgentConfig *cfg) {
@@ -54,62 +82,109 @@ static cJSON *build_user_message(const char *prompt) {
     return msg;
 }
 
-static void log_step_header(int step, int max, int verbose) {
-    if (verbose) {
-        fprintf(stderr, "\n=== step %d/%d ===\n", step + 1, max);
-    }
-}
+static void cli_on_event(const AgentEvent *event, void *userdata) {
+    const AgentConfig *cfg = (const AgentConfig *)userdata;
+    if (!event || !cfg) return;
 
-static void log_tool_call(const char *name, const char *args_str, int verbose) {
-    if (verbose) {
-        fprintf(stderr, ">> tool: %s %s\n", name,
-            args_str ? args_str : "{}");
-    } else {
-        fprintf(stderr, "  · %s\n", name);
-    }
-}
-
-static void log_tool_result(const char *result, int verbose) {
-    if (!verbose) return;
-    size_t n = strlen(result);
-    size_t show = n > 400 ? 400 : n;
-    fprintf(stderr, "<< result (%zu bytes): %.*s%s\n",
-        n, (int)show, result, n > show ? "..." : "");
-}
-
-int agent_run(const AgentConfig *cfg, const char *user_prompt) {
-    cJSON *messages = cJSON_CreateArray();
-    cJSON_AddItemToArray(messages, build_system_message(cfg));
-    cJSON_AddItemToArray(messages, build_user_message(user_prompt));
-
-    ToolCtx ctx = {
-        .memory_path       = cfg->memory_path,
-        .allow_exec        = cfg->allow_exec,
-        .allow_unsafe_exec = cfg->allow_unsafe_exec,
-        .bg                = cfg->allow_exec ? bg_table_new() : NULL,
-    };
-    cJSON *tools = tools_describe(&ctx);
-
-    int rc = 0;
-
-    for (int step = 0; step < cfg->max_steps; step++) {
-        log_step_header(step, cfg->max_steps, cfg->verbose);
-
-        cJSON *resp = openrouter_chat(cfg->api_key, cfg->model, messages, tools);
-        if (!resp) {
-            fprintf(stderr, "agent: no response\n");
-            rc = 1;
-            goto done;
+    switch (event->type) {
+    case AGENT_EVENT_STEP_START:
+        if (cfg->verbose) {
+            fprintf(stderr, "\n=== step %d/%d ===\n",
+                event->step_index + 1, event->max_steps);
         }
+        break;
+    case AGENT_EVENT_TOOL_CALL_START:
+        if (cfg->verbose) {
+            fprintf(stderr, ">> tool: %s %s\n",
+                event->tool_name ? event->tool_name : "(unknown)",
+                event->tool_args ? event->tool_args : "{}");
+        } else {
+            fprintf(stderr, "  · %s\n",
+                event->tool_name ? event->tool_name : "(unknown)");
+        }
+        break;
+    case AGENT_EVENT_TOOL_CALL_RESULT:
+        if (cfg->verbose && event->message) {
+            size_t n = strlen(event->message);
+            size_t show = n > 400 ? 400 : n;
+            fprintf(stderr, "<< result (%zu bytes): %.*s%s\n",
+                n, (int)show, event->message, n > show ? "..." : "");
+        }
+        break;
+    case AGENT_EVENT_ERROR:
+        fprintf(stderr, "agent: %s\n",
+            event->message ? event->message : "unknown error");
+        break;
+    default:
+        break;
+    }
+}
+
+AgentSession *agent_session_new(const AgentConfig *cfg) {
+    if (!cfg) return NULL;
+
+    AgentSession *session = calloc(1, sizeof *session);
+    if (!session) return NULL;
+    session->cfg = *cfg;
+
+    session->messages = cJSON_CreateArray();
+    if (!session->messages) {
+        free(session);
+        return NULL;
+    }
+    cJSON_AddItemToArray(session->messages, build_system_message(cfg));
+
+    session->ctx.memory_path = cfg->memory_path;
+    session->ctx.allow_exec = cfg->allow_exec;
+    session->ctx.allow_unsafe_exec = cfg->allow_unsafe_exec;
+    session->ctx.bg = cfg->allow_exec ? bg_table_new() : NULL;
+
+    session->tools = tools_describe(&session->ctx);
+    if (!session->tools) {
+        agent_session_free(session);
+        return NULL;
+    }
+
+    return session;
+}
+
+int agent_session_run(AgentSession *session,
+                      const char *user_prompt,
+                      const AgentHooks *hooks,
+                      char **out_final) {
+    if (out_final) *out_final = NULL;
+    if (!session || !user_prompt) return 1;
+
+    cJSON_AddItemToArray(session->messages, build_user_message(user_prompt));
+
+    for (int step = 0; step < session->cfg.max_steps; step++) {
+        emit_event(hooks, AGENT_EVENT_STEP_START, step, session->cfg.max_steps,
+            NULL, NULL, NULL, 0);
+        emit_event(hooks, AGENT_EVENT_MODEL_REQUEST_START, step, session->cfg.max_steps,
+            "Requesting model response", NULL, NULL, 0);
+
+        char *api_err = NULL;
+        cJSON *resp = openrouter_chat(session->cfg.api_key,
+            session->cfg.model,
+            session->messages,
+            session->tools,
+            &api_err);
+        if (!resp) {
+            emit_event(hooks, AGENT_EVENT_ERROR, step, session->cfg.max_steps,
+                api_err ? api_err : "no response", NULL, NULL, 0);
+            free(api_err);
+            return 1;
+        }
+        free(api_err);
 
         cJSON *err = cJSON_GetObjectItem(resp, "error");
         if (err) {
             char *err_str = cJSON_PrintUnformatted(err);
-            fprintf(stderr, "agent: API error: %s\n", err_str ? err_str : "(unknown)");
+            emit_event(hooks, AGENT_EVENT_ERROR, step, session->cfg.max_steps,
+                err_str ? err_str : "(unknown API error)", NULL, NULL, 0);
             free(err_str);
             cJSON_Delete(resp);
-            rc = 1;
-            goto done;
+            return 1;
         }
 
         cJSON *choices = cJSON_GetObjectItem(resp, "choices");
@@ -117,20 +192,24 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
         cJSON *message = choice0 ? cJSON_GetObjectItem(choice0, "message") : NULL;
         if (!message) {
             char *raw = cJSON_PrintUnformatted(resp);
-            fprintf(stderr, "agent: malformed response: %.500s\n",
+            Buf err_msg;
+            buf_init(&err_msg);
+            buf_printf(&err_msg, "malformed response: %.500s",
                 raw ? raw : "(?)");
+            emit_event(hooks, AGENT_EVENT_ERROR, step, session->cfg.max_steps,
+                err_msg.data ? err_msg.data : "malformed response",
+                NULL, NULL, 0);
             free(raw);
+            buf_free(&err_msg);
             cJSON_Delete(resp);
-            rc = 1;
-            goto done;
+            return 1;
         }
 
-        /* Detach assistant message from response and append to history. */
         cJSON *assistant = cJSON_Duplicate(message, 1);
-        cJSON_AddItemToArray(messages, assistant);
+        cJSON_AddItemToArray(session->messages, assistant);
 
         cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
-        cJSON *content    = cJSON_GetObjectItem(message, "content");
+        cJSON *content = cJSON_GetObjectItem(message, "content");
 
         if (cJSON_IsArray(tool_calls) && cJSON_GetArraySize(tool_calls) > 0) {
             int n = cJSON_GetArraySize(tool_calls);
@@ -144,25 +223,27 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
                 const char *args_str = cJSON_IsString(args_j) ? args_j->valuestring : NULL;
 
                 cJSON *args_parsed = args_str ? cJSON_Parse(args_str) : NULL;
-                log_tool_call(name ? name : "(unknown)", args_str, cfg->verbose);
+                emit_event(hooks, AGENT_EVENT_TOOL_CALL_START, step, session->cfg.max_steps,
+                    NULL, name, args_str, 0);
 
                 long t0 = now_ms();
-                char *raw = tools_dispatch(&ctx, name, args_parsed);
+                char *raw = tools_dispatch(&session->ctx, name, args_parsed);
                 long dt = now_ms() - t0;
 
-                /* Prefix every tool result with a one-line metadata header.
-                 * Skips if the tool already emitted its own duration_ms (exec_command/spawn_bg). */
                 char *result;
                 if (raw && strstr(raw, "duration_ms=")) {
                     result = raw;
                 } else {
-                    Buf meta; buf_init(&meta);
+                    Buf meta;
+                    buf_init(&meta);
                     buf_printf(&meta, "[meta] duration_ms=%ld\n", dt);
                     if (raw) buf_append_cstr(&meta, raw);
                     free(raw);
                     result = meta.data;
                 }
-                log_tool_result(result ? result : "", cfg->verbose);
+
+                emit_event(hooks, AGENT_EVENT_TOOL_CALL_RESULT, step, session->cfg.max_steps,
+                    result, name, args_str, dt);
 
                 cJSON *tool_msg = cJSON_CreateObject();
                 cJSON_AddStringToObject(tool_msg, "role", "tool");
@@ -171,31 +252,68 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
                 }
                 if (name) cJSON_AddStringToObject(tool_msg, "name", name);
                 cJSON_AddStringToObject(tool_msg, "content", result ? result : "");
-                cJSON_AddItemToArray(messages, tool_msg);
+                cJSON_AddItemToArray(session->messages, tool_msg);
 
                 free(result);
                 if (args_parsed) cJSON_Delete(args_parsed);
             }
             cJSON_Delete(resp);
-            continue; /* go around the loop, let the model respond to tool output */
+            continue;
         }
 
-        /* No tool calls — assistant gave a final text response. */
         if (cJSON_IsString(content) && content->valuestring) {
-            printf("%s\n", content->valuestring);
+            if (out_final) *out_final = strdup(content->valuestring);
+            emit_event(hooks, AGENT_EVENT_FINAL_RESPONSE, step, session->cfg.max_steps,
+                content->valuestring, NULL, NULL, 0);
         } else {
-            printf("(no content)\n");
+            if (out_final) *out_final = strdup("(no content)");
+            emit_event(hooks, AGENT_EVENT_FINAL_RESPONSE, step, session->cfg.max_steps,
+                "(no content)", NULL, NULL, 0);
         }
         cJSON_Delete(resp);
-        goto done;
+        return 0;
     }
 
-    fprintf(stderr, "agent: hit max_steps=%d without a final answer\n", cfg->max_steps);
-    rc = 2;
+    {
+        Buf err_msg;
+        buf_init(&err_msg);
+        buf_printf(&err_msg, "hit max_steps=%d without a final answer",
+            session->cfg.max_steps);
+        emit_event(hooks, AGENT_EVENT_ERROR, session->cfg.max_steps - 1,
+            session->cfg.max_steps,
+            err_msg.data ? err_msg.data : "hit max steps",
+            NULL, NULL, 0);
+        buf_free(&err_msg);
+    }
+    return 2;
+}
 
-done:
-    cJSON_Delete(messages);
-    cJSON_Delete(tools);
-    if (ctx.bg) bg_table_free_kill_all(ctx.bg);
+void agent_session_free(AgentSession *session) {
+    if (!session) return;
+    cJSON_Delete(session->messages);
+    cJSON_Delete(session->tools);
+    if (session->ctx.bg) bg_table_free_kill_all(session->ctx.bg);
+    free(session);
+}
+
+int agent_run(const AgentConfig *cfg, const char *user_prompt) {
+    AgentSession *session = agent_session_new(cfg);
+    if (!session) {
+        fprintf(stderr, "agent: could not initialize session\n");
+        return 1;
+    }
+
+    AgentHooks hooks = {
+        .on_event = cli_on_event,
+        .userdata = (void *)cfg,
+    };
+    char *final = NULL;
+    int rc = agent_session_run(session, user_prompt, &hooks, &final);
+    if (rc == 0) {
+        printf("%s\n", final ? final : "(no content)");
+    }
+
+    free(final);
+    agent_session_free(session);
     return rc;
 }
