@@ -8,6 +8,8 @@ typedef struct {
     const char *memory_path;
     int max_steps;
     int verbose;
+    int allow_exec;
+    int allow_unsafe_exec;
 } AgentConfig;
 
 /* Runs the agent for a single user prompt. Returns 0 on success, non-zero on error. */

@@ -23,6 +23,11 @@ static void usage(const char *argv0) {
         "                        or $SYSTEM_PROMPT_PATH)\n"
         "      --memory PATH     Path to MEMORY.md (default ./MEMORY.md\n"
         "                        or $MEMORY_PATH)\n"
+        "      --allow-exec      Enable exec_command and spawn_bg tools\n"
+        "                        (sandboxed by default).\n"
+        "      --allow-unsafe-exec\n"
+        "                        Allow profile='none' in exec/spawn_bg (no sandbox).\n"
+        "                        Implies --allow-exec.\n"
         "  -v, --verbose         Print step / tool-call traces to stderr\n"
         "  -h, --help            Show this help\n"
         "\n"
@@ -48,9 +53,12 @@ int main(int argc, char **argv) {
         .model       = getenv_or("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
         .system_path = getenv_or("SYSTEM_PROMPT_PATH", "SYSTEM_PROMPT.md"),
         .memory_path = getenv_or("MEMORY_PATH", "MEMORY.md"),
-        .max_steps   = 10,
-        .verbose     = 0,
+        .max_steps         = 10,
+        .verbose           = 0,
+        .allow_exec        = getenv("LLA_ALLOW_EXEC") ? 1 : 0,
+        .allow_unsafe_exec = getenv("LLA_ALLOW_UNSAFE_EXEC") ? 1 : 0,
     };
+    if (cfg.allow_unsafe_exec) cfg.allow_exec = 1;
 
     const char *prompt = NULL;
 
@@ -81,6 +89,13 @@ int main(int argc, char **argv) {
         } else if (strcmp(a, "--memory") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "missing value for %s\n", a); return 2; }
             cfg.memory_path = argv[++i];
+            i++;
+        } else if (strcmp(a, "--allow-exec") == 0) {
+            cfg.allow_exec = 1;
+            i++;
+        } else if (strcmp(a, "--allow-unsafe-exec") == 0) {
+            cfg.allow_exec = 1;
+            cfg.allow_unsafe_exec = 1;
             i++;
         } else if (a[0] == '-' && a[1] != '\0') {
             fprintf(stderr, "unknown option: %s\n", a);

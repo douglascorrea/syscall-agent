@@ -1,4 +1,8 @@
 #include "tools.h"
+#include "tools_fs.h"
+#include "tools_proc.h"
+#include "tools_watch.h"
+#include "tools_net.h"
 #include "util.h"
 #include "http.h"
 #include "memory.h"
@@ -427,7 +431,7 @@ static void add_string_prop(cJSON *params, const char *name, const char *desc) {
     cJSON_AddStringToObject(p, "description", desc);
 }
 
-cJSON *tools_describe(void) {
+cJSON *tools_describe(const ToolCtx *ctx) {
     cJSON *arr = cJSON_CreateArray();
 
     {   /* read_file */
@@ -487,6 +491,11 @@ cJSON *tools_describe(void) {
             p));
     }
 
+    tools_fs_register(arr);
+    tools_proc_register(arr, ctx ? ctx->allow_exec : 0);
+    tools_watch_register(arr);
+    tools_net_register(arr);
+
     return arr;
 }
 
@@ -498,6 +507,13 @@ char *tools_dispatch(ToolCtx *ctx, const char *name, cJSON *args) {
     if (strcmp(name, "fetch_url") == 0)    return tool_fetch_url(args);
     if (strcmp(name, "web_fetch") == 0)    return tool_web_fetch(args);
     if (strcmp(name, "save_memory") == 0)  return tool_save_memory(ctx, args);
+
+    char *r;
+    if ((r = tools_fs_dispatch(ctx, name, args)))    return r;
+    if ((r = tools_proc_dispatch(ctx, name, args)))  return r;
+    if ((r = tools_watch_dispatch(ctx, name, args))) return r;
+    if ((r = tools_net_dispatch(ctx, name, args)))   return r;
+
     Buf b;
     buf_init(&b);
     buf_printf(&b, "ERROR: unknown tool '%s'", name);

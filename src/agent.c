@@ -1,6 +1,7 @@
 #include "agent.h"
 #include "openrouter.h"
 #include "tools.h"
+#include "tools_proc.h"
 #include "memory.h"
 #include "util.h"
 #include "../vendor/cJSON.h"
@@ -8,6 +9,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+static long now_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
 
 static cJSON *build_system_message(const AgentConfig *cfg) {
     size_t slen = 0, mlen = 0;
@@ -74,8 +82,13 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
     cJSON_AddItemToArray(messages, build_system_message(cfg));
     cJSON_AddItemToArray(messages, build_user_message(user_prompt));
 
-    cJSON *tools = tools_describe();
-    ToolCtx ctx = { .memory_path = cfg->memory_path };
+    ToolCtx ctx = {
+        .memory_path       = cfg->memory_path,
+        .allow_exec        = cfg->allow_exec,
+        .allow_unsafe_exec = cfg->allow_unsafe_exec,
+        .bg                = cfg->allow_exec ? bg_table_new() : NULL,
+    };
+    cJSON *tools = tools_describe(&ctx);
 
     int rc = 0;
 
@@ -133,7 +146,22 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
                 cJSON *args_parsed = args_str ? cJSON_Parse(args_str) : NULL;
                 log_tool_call(name ? name : "(unknown)", args_str, cfg->verbose);
 
-                char *result = tools_dispatch(&ctx, name, args_parsed);
+                long t0 = now_ms();
+                char *raw = tools_dispatch(&ctx, name, args_parsed);
+                long dt = now_ms() - t0;
+
+                /* Prefix every tool result with a one-line metadata header.
+                 * Skips if the tool already emitted its own duration_ms (exec_command/spawn_bg). */
+                char *result;
+                if (raw && strstr(raw, "duration_ms=")) {
+                    result = raw;
+                } else {
+                    Buf meta; buf_init(&meta);
+                    buf_printf(&meta, "[meta] duration_ms=%ld\n", dt);
+                    if (raw) buf_append_cstr(&meta, raw);
+                    free(raw);
+                    result = meta.data;
+                }
                 log_tool_result(result ? result : "", cfg->verbose);
 
                 cJSON *tool_msg = cJSON_CreateObject();
@@ -168,5 +196,6 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
 done:
     cJSON_Delete(messages);
     cJSON_Delete(tools);
+    if (ctx.bg) bg_table_free_kill_all(ctx.bg);
     return rc;
 }
