@@ -9,9 +9,15 @@
 cJSON *openrouter_chat(const char *api_key,
                        const char *model,
                        cJSON *messages,
-                       cJSON *tools) {
+                       cJSON *tools,
+                       int want_reasoning) {
     cJSON *req = cJSON_CreateObject();
     cJSON_AddStringToObject(req, "model", model);
+    if (want_reasoning) {
+        cJSON *reasoning = cJSON_CreateObject();
+        cJSON_AddNumberToObject(reasoning, "max_tokens", 2000);
+        cJSON_AddItemToObject(req, "reasoning", reasoning);
+    }
     /* Share the references — we'll Detach before deleting req to avoid double-free. */
     cJSON_AddItemReferenceToObject(req, "messages", messages);
     if (tools) {
