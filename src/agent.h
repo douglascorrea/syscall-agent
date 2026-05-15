@@ -12,7 +12,35 @@ typedef struct {
     int allow_unsafe_exec;
 } AgentConfig;
 
+#define AGENT_VERBOSE_NORMAL    0
+#define AGENT_VERBOSE_TOOLS     (1 << 0)
+#define AGENT_VERBOSE_REASONING (1 << 1)
+#define AGENT_VERBOSE_ALL       (AGENT_VERBOSE_TOOLS | AGENT_VERBOSE_REASONING)
+
+typedef enum {
+    AGENT_EVENT_STATUS,
+    AGENT_EVENT_TOOL_CALL,
+    AGENT_EVENT_TOOL_RESULT,
+    AGENT_EVENT_REASONING,
+    AGENT_EVENT_ASSISTANT,
+    AGENT_EVENT_ERROR
+} AgentEventType;
+
+typedef struct {
+    AgentEventType type;
+    const char *title;
+    const char *content;
+} AgentEvent;
+
+typedef void (*AgentEventHandler)(const AgentEvent *event, void *userdata);
+
 /* Runs the agent for a single user prompt. Returns 0 on success, non-zero on error. */
 int agent_run(const AgentConfig *cfg, const char *user_prompt);
+
+/* Same agent loop, but emits UI-friendly events instead of printing the final answer. */
+int agent_run_with_events(const AgentConfig *cfg,
+                          const char *user_prompt,
+                          AgentEventHandler handler,
+                          void *userdata);
 
 #endif

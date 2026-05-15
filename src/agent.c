@@ -77,7 +77,64 @@ static void log_tool_result(const char *result, int verbose) {
         n, (int)show, result, n > show ? "..." : "");
 }
 
-int agent_run(const AgentConfig *cfg, const char *user_prompt) {
+static void emit_event(AgentEventHandler handler, void *userdata,
+                       AgentEventType type, const char *title,
+                       const char *content) {
+    if (!handler) return;
+    AgentEvent ev = {
+        .type = type,
+        .title = title,
+        .content = content
+    };
+    handler(&ev, userdata);
+}
+
+static char *extract_reasoning_text(cJSON *message) {
+    cJSON *reasoning = cJSON_GetObjectItem(message, "reasoning");
+    if (cJSON_IsString(reasoning) && reasoning->valuestring && *reasoning->valuestring) {
+        return strdup(reasoning->valuestring);
+    }
+
+    cJSON *reasoning_content = cJSON_GetObjectItem(message, "reasoning_content");
+    if (cJSON_IsString(reasoning_content) &&
+        reasoning_content->valuestring &&
+        *reasoning_content->valuestring) {
+        return strdup(reasoning_content->valuestring);
+    }
+
+    cJSON *details = cJSON_GetObjectItem(message, "reasoning_details");
+    if (cJSON_IsArray(details) && cJSON_GetArraySize(details) > 0) {
+        Buf out;
+        buf_init(&out);
+        int n = cJSON_GetArraySize(details);
+        for (int i = 0; i < n; i++) {
+            cJSON *item = cJSON_GetArrayItem(details, i);
+            cJSON *summary = cJSON_GetObjectItem(item, "summary");
+            cJSON *text = cJSON_GetObjectItem(item, "text");
+            cJSON *type = cJSON_GetObjectItem(item, "type");
+            if (cJSON_IsString(summary) && summary->valuestring) {
+                buf_append_cstr(&out, summary->valuestring);
+                buf_append_cstr(&out, "\n");
+            } else if (cJSON_IsString(text) && text->valuestring) {
+                buf_append_cstr(&out, text->valuestring);
+                buf_append_cstr(&out, "\n");
+            } else if (cJSON_IsString(type) && type->valuestring) {
+                buf_printf(&out, "[%s]\n", type->valuestring);
+            }
+        }
+        if (out.len > 0) return out.data;
+        buf_free(&out);
+
+        return cJSON_PrintUnformatted(details);
+    }
+
+    return NULL;
+}
+
+int agent_run_with_events(const AgentConfig *cfg,
+                          const char *user_prompt,
+                          AgentEventHandler handler,
+                          void *userdata) {
     cJSON *messages = cJSON_CreateArray();
     cJSON_AddItemToArray(messages, build_system_message(cfg));
     cJSON_AddItemToArray(messages, build_user_message(user_prompt));
@@ -93,11 +150,22 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
     int rc = 0;
 
     for (int step = 0; step < cfg->max_steps; step++) {
-        log_step_header(step, cfg->max_steps, cfg->verbose);
+        if (!handler) log_step_header(step, cfg->max_steps, cfg->verbose);
+        if (handler) {
+            char status[64];
+            snprintf(status, sizeof status, "step %d/%d", step + 1, cfg->max_steps);
+            emit_event(handler, userdata, AGENT_EVENT_STATUS, "agent", status);
+        }
 
-        cJSON *resp = openrouter_chat(cfg->api_key, cfg->model, messages, tools);
+        cJSON *resp = openrouter_chat(
+            cfg->api_key,
+            cfg->model,
+            messages,
+            tools,
+            (cfg->verbose & AGENT_VERBOSE_REASONING) != 0);
         if (!resp) {
             fprintf(stderr, "agent: no response\n");
+            emit_event(handler, userdata, AGENT_EVENT_ERROR, "agent", "no response");
             rc = 1;
             goto done;
         }
@@ -105,7 +173,11 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
         cJSON *err = cJSON_GetObjectItem(resp, "error");
         if (err) {
             char *err_str = cJSON_PrintUnformatted(err);
-            fprintf(stderr, "agent: API error: %s\n", err_str ? err_str : "(unknown)");
+            if (!handler) {
+                fprintf(stderr, "agent: API error: %s\n", err_str ? err_str : "(unknown)");
+            }
+            emit_event(handler, userdata, AGENT_EVENT_ERROR, "API error",
+                err_str ? err_str : "(unknown)");
             free(err_str);
             cJSON_Delete(resp);
             rc = 1;
@@ -117,7 +189,11 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
         cJSON *message = choice0 ? cJSON_GetObjectItem(choice0, "message") : NULL;
         if (!message) {
             char *raw = cJSON_PrintUnformatted(resp);
-            fprintf(stderr, "agent: malformed response: %.500s\n",
+            if (!handler) {
+                fprintf(stderr, "agent: malformed response: %.500s\n",
+                    raw ? raw : "(?)");
+            }
+            emit_event(handler, userdata, AGENT_EVENT_ERROR, "malformed response",
                 raw ? raw : "(?)");
             free(raw);
             cJSON_Delete(resp);
@@ -132,6 +208,14 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
         cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
         cJSON *content    = cJSON_GetObjectItem(message, "content");
 
+        if ((cfg->verbose & AGENT_VERBOSE_REASONING) != 0) {
+            char *reasoning = extract_reasoning_text(message);
+            if (reasoning && *reasoning) {
+                emit_event(handler, userdata, AGENT_EVENT_REASONING, "reasoning", reasoning);
+            }
+            free(reasoning);
+        }
+
         if (cJSON_IsArray(tool_calls) && cJSON_GetArraySize(tool_calls) > 0) {
             int n = cJSON_GetArraySize(tool_calls);
             for (int i = 0; i < n; i++) {
@@ -144,7 +228,12 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
                 const char *args_str = cJSON_IsString(args_j) ? args_j->valuestring : NULL;
 
                 cJSON *args_parsed = args_str ? cJSON_Parse(args_str) : NULL;
-                log_tool_call(name ? name : "(unknown)", args_str, cfg->verbose);
+                if (!handler) {
+                    log_tool_call(name ? name : "(unknown)", args_str, cfg->verbose);
+                } else if ((cfg->verbose & AGENT_VERBOSE_TOOLS) != 0) {
+                    emit_event(handler, userdata, AGENT_EVENT_TOOL_CALL,
+                        name ? name : "(unknown)", args_str ? args_str : "{}");
+                }
 
                 long t0 = now_ms();
                 char *raw = tools_dispatch(&ctx, name, args_parsed);
@@ -162,7 +251,12 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
                     free(raw);
                     result = meta.data;
                 }
-                log_tool_result(result ? result : "", cfg->verbose);
+                if (!handler) {
+                    log_tool_result(result ? result : "", cfg->verbose);
+                } else if ((cfg->verbose & AGENT_VERBOSE_TOOLS) != 0) {
+                    emit_event(handler, userdata, AGENT_EVENT_TOOL_RESULT,
+                        name ? name : "tool result", result ? result : "");
+                }
 
                 cJSON *tool_msg = cJSON_CreateObject();
                 cJSON_AddStringToObject(tool_msg, "role", "tool");
@@ -182,15 +276,28 @@ int agent_run(const AgentConfig *cfg, const char *user_prompt) {
 
         /* No tool calls — assistant gave a final text response. */
         if (cJSON_IsString(content) && content->valuestring) {
-            printf("%s\n", content->valuestring);
+            if (handler) {
+                emit_event(handler, userdata, AGENT_EVENT_ASSISTANT,
+                    "assistant", content->valuestring);
+            } else {
+                printf("%s\n", content->valuestring);
+            }
         } else {
-            printf("(no content)\n");
+            if (handler) {
+                emit_event(handler, userdata, AGENT_EVENT_ASSISTANT,
+                    "assistant", "(no content)");
+            } else {
+                printf("(no content)\n");
+            }
         }
         cJSON_Delete(resp);
         goto done;
     }
 
-    fprintf(stderr, "agent: hit max_steps=%d without a final answer\n", cfg->max_steps);
+    if (!handler) {
+        fprintf(stderr, "agent: hit max_steps=%d without a final answer\n", cfg->max_steps);
+    }
+    emit_event(handler, userdata, AGENT_EVENT_ERROR, "agent", "hit max_steps without a final answer");
     rc = 2;
 
 done:
@@ -198,4 +305,8 @@ done:
     cJSON_Delete(tools);
     if (ctx.bg) bg_table_free_kill_all(ctx.bg);
     return rc;
+}
+
+int agent_run(const AgentConfig *cfg, const char *user_prompt) {
+    return agent_run_with_events(cfg, user_prompt, NULL, NULL);
 }

@@ -16,6 +16,7 @@ endif
 
 SRC := \
   src/main.c \
+  src/tui.c \
   src/agent.c \
   src/openrouter.c \
   src/tools.c \
@@ -31,7 +32,7 @@ SRC := \
 
 OBJ := $(SRC:%.c=$(BUILD)/%.o)
 
-.PHONY: all clean run
+.PHONY: all clean run test
 
 all: $(BIN)
 
@@ -49,3 +50,15 @@ clean:
 
 run: $(BIN)
 	./$(BIN) $(ARGS)
+
+test: $(BUILD)/tui_test $(BUILD)/agent_events_test
+	./$(BUILD)/tui_test
+	./$(BUILD)/agent_events_test
+
+$(BUILD)/tui_test: tests/tui_test.c src/tui.c src/util.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCS) tests/tui_test.c src/tui.c src/util.c -o $@
+
+$(BUILD)/agent_events_test: tests/agent_events_test.c src/agent.c src/util.c vendor/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCS) tests/agent_events_test.c src/agent.c src/util.c vendor/cJSON.c -o $@

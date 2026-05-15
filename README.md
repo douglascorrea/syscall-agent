@@ -20,6 +20,7 @@ export BRAVE_SEARCH_API_KEY=...
 ./build/agent "summarize the files in this repo"
 ./build/agent -s 20 -m anthropic/claude-3.5-sonnet "find the largest .c file and tell me what it does"
 echo "what is in MEMORY.md?" | ./build/agent
+./build/agent --tui
 
 # enable subprocess tools (default sandbox: read-only FS, no network)
 ./build/agent --allow-exec "run 'git log -n 5 --oneline' and summarize"
@@ -86,12 +87,30 @@ Applied between `fork()` and `execvp()` via `sandbox_init(3)` on macOS (Linux is
 ```
 -s / --steps N        max agent-loop iterations (default 10)
 -m / --model NAME     OpenRouter model id (default openai/gpt-4o-mini)
+--tui                 open the Pi-style terminal UI
 --system PATH         path to SYSTEM_PROMPT.md
 --memory PATH         path to MEMORY.md
 --allow-exec          enable exec_command, spawn_bg, bg_read, bg_kill, bg_list
 --allow-unsafe-exec   also allow profile='none' (no sandbox). Implies --allow-exec.
 -v / --verbose        trace tool calls to stderr
 ```
+
+## TUI
+
+`./build/agent --tui` starts a responsive terminal UI inspired by Pi: full-width borders,
+muted status/footer lines, padded user blocks, and compact tool/reasoning panels.
+
+Slash commands:
+
+- `/model` lists predefined OpenRouter model choices.
+- `/model N` or `/model provider/model-id` selects a predefined model.
+- `/verbose normal` shows only regular conversation text.
+- `/verbose tools` also shows tool calls and tool results.
+- `/verbose reasoning` also shows `reasoning`, `reasoning_content`, or `reasoning_details`
+  returned by models that support those fields.
+- `/verbose all` shows both tools and reasoning.
+- `/new` clears the visible transcript.
+- `/exit` leaves the TUI.
 
 `LLA_ALLOW_EXEC=1` and `LLA_ALLOW_UNSAFE_EXEC=1` work the same way.
 
