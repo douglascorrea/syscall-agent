@@ -1,0 +1,1 @@
+low_level_agent │ git:(feature/syscall-tools) │ Sonnet 4.6 │ ctx: 106%

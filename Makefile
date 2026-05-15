@@ -7,11 +7,24 @@ INCS    := -Isrc -Ivendor $(shell curl-config --cflags)
 BUILD   := build
 BIN     := $(BUILD)/agent
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  OS_COMPAT_SRC := src/os_compat_darwin.c
+else
+  OS_COMPAT_SRC := src/os_compat_linux.c
+endif
+
 SRC := \
   src/main.c \
+  src/tui.c \
   src/agent.c \
   src/openrouter.c \
   src/tools.c \
+  src/tools_fs.c \
+  src/tools_proc.c \
+  src/tools_watch.c \
+  src/tools_net.c \
+  $(OS_COMPAT_SRC) \
   src/memory.c \
   src/http.c \
   src/util.c \
@@ -19,7 +32,7 @@ SRC := \
 
 OBJ := $(SRC:%.c=$(BUILD)/%.o)
 
-.PHONY: all clean run
+.PHONY: all clean run test
 
 all: $(BIN)
 
@@ -37,3 +50,15 @@ clean:
 
 run: $(BIN)
 	./$(BIN) $(ARGS)
+
+test: $(BUILD)/tui_test $(BUILD)/agent_events_test
+	./$(BUILD)/tui_test
+	./$(BUILD)/agent_events_test
+
+$(BUILD)/tui_test: tests/tui_test.c src/tui.c src/util.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCS) tests/tui_test.c src/tui.c src/util.c -o $@
+
+$(BUILD)/agent_events_test: tests/agent_events_test.c src/agent.c src/util.c vendor/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCS) tests/agent_events_test.c src/agent.c src/util.c vendor/cJSON.c -o $@

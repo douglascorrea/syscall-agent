@@ -1,9 +1,12 @@
 #include "memory.h"
 #include "util.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>
 #include <time.h>
+#include <unistd.h>
 
 char *memory_load(const char *path, size_t *out_len) {
     if (!file_exists(path)) return NULL;
@@ -26,7 +29,16 @@ int memory_append(const char *path, const char *topic, const char *content) {
         topic && *topic ? topic : "note", ts,
         content ? content : "");
 
-    int rc = append_text_file(path, b.data, b.len);
+    /* O_APPEND on most platforms gives us atomic appends per-write, but we
+     * still take an exclusive flock so parallel agents can't interleave the
+     * header + body of one entry. */
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd < 0) { buf_free(&b); return -1; }
+    if (flock(fd, LOCK_EX) != 0) { close(fd); buf_free(&b); return -1; }
+    ssize_t wn = write(fd, b.data, b.len);
+    int ok = (wn >= 0 && (size_t)wn == b.len);
+    flock(fd, LOCK_UN);
+    close(fd);
     buf_free(&b);
-    return rc;
+    return ok ? 0 : -1;
 }
