@@ -5,6 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int is_http_url(const char *url) {
+    return url &&
+           (strncmp(url, "http://", 7) == 0 ||
+            strncmp(url, "https://", 8) == 0);
+}
+
 static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t add = size * nmemb;
     HttpResponse *r = (HttpResponse *)userdata;
@@ -55,8 +61,12 @@ static HttpResponse perform(CURL *c) {
 }
 
 HttpResponse http_get(const char *url, const char *const *headers) {
-    CURL *c = curl_easy_init();
     HttpResponse r = {0};
+    if (!is_http_url(url)) {
+        r.error = strdup("unsupported URL scheme; only http:// and https:// are allowed");
+        return r;
+    }
+    CURL *c = curl_easy_init();
     if (!c) { r.error = strdup("curl init failed"); return r; }
     struct curl_slist *list = build_headers(headers);
     curl_easy_setopt(c, CURLOPT_URL, url);
@@ -68,8 +78,12 @@ HttpResponse http_get(const char *url, const char *const *headers) {
 }
 
 HttpResponse http_post_json(const char *url, const char *body, const char *const *headers) {
-    CURL *c = curl_easy_init();
     HttpResponse r = {0};
+    if (!is_http_url(url)) {
+        r.error = strdup("unsupported URL scheme; only http:// and https:// are allowed");
+        return r;
+    }
+    CURL *c = curl_easy_init();
     if (!c) { r.error = strdup("curl init failed"); return r; }
     struct curl_slist *list = curl_slist_append(NULL, "Content-Type: application/json");
     if (headers) {
@@ -86,8 +100,12 @@ HttpResponse http_post_json(const char *url, const char *body, const char *const
 }
 
 HttpResponse http_post_form(const char *url, const char *body, const char *const *headers) {
-    CURL *c = curl_easy_init();
     HttpResponse r = {0};
+    if (!is_http_url(url)) {
+        r.error = strdup("unsupported URL scheme; only http:// and https:// are allowed");
+        return r;
+    }
+    CURL *c = curl_easy_init();
     if (!c) { r.error = strdup("curl init failed"); return r; }
     struct curl_slist *list = curl_slist_append(NULL,
         "Content-Type: application/x-www-form-urlencoded");

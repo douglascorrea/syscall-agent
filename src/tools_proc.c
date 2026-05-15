@@ -17,6 +17,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#define EXEC_OUTPUT_MAX  (256 * 1024)
+#define EXEC_ARG_MAX     128
+#define EXEC_TIMEOUT_MAX_MS 120000
+#define BG_WAIT_MAX_MS    30000
+
 /* ============================================================ *
  *                        helpers                                *
  * ============================================================ */
@@ -67,6 +72,7 @@ static char **json_to_argv(cJSON *arr) {
     if (!cJSON_IsArray(arr)) return NULL;
     int n = cJSON_GetArraySize(arr);
     if (n <= 0) return NULL;
+    if (n > EXEC_ARG_MAX) return NULL;
     char **argv = calloc(n + 1, sizeof *argv);
     if (!argv) return NULL;
     for (int i = 0; i < n; i++) {
@@ -147,8 +153,6 @@ static char *tool_list_processes(cJSON *args) {
  *               exec_command (P1) + bg machinery (P2)           *
  * ============================================================ */
 
-#define EXEC_OUTPUT_MAX  (256 * 1024)
-
 typedef struct {
     int fd;
     Buf buf;
@@ -193,12 +197,35 @@ static void apply_rlimits_default(void) {
     r.rlim_cur = r.rlim_max = 256;            setrlimit(RLIMIT_NOFILE, &r);
 }
 
+static int valid_profile(const char *profile) {
+    if (!profile) return 1;
+    return strcmp(profile, "readonly") == 0 ||
+           strcmp(profile, "default") == 0 ||
+           strcmp(profile, "network") == 0 ||
+           strcmp(profile, "build") == 0 ||
+           strcmp(profile, "none") == 0;
+}
+
+static char *validate_exec_profile(const ToolCtx *ctx, const char *profile) {
+    if (!valid_profile(profile)) {
+        return strdup("ERROR: invalid sandbox profile (expected readonly, default, network, build, or none)");
+    }
+    if (profile && strcmp(profile, "none") == 0 && !ctx->allow_unsafe_exec) {
+        return strdup("ERROR: profile='none' requires --allow-unsafe-exec");
+    }
+    return NULL;
+}
+
 typedef struct {
     pid_t pid;
     int stdin_fd;
     int stdout_fd;
     int stderr_fd;
 } SpawnHandle;
+
+static void close_if_open(int fd) {
+    if (fd >= 0) close(fd);
+}
 
 /* Spawn a child. Returns 0 on success, -1 on fork failure.
  * On success, fills h. Child inherits the sandbox profile and rlimits. */
@@ -210,12 +237,18 @@ static int spawn_child(char *const argv[], const char *cwd, char *const env[],
     int err_pipe[2] = {-1, -1};
     if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
         if (err_out) *err_out = strdup("pipe() failed");
+        close_if_open(in_pipe[0]);  close_if_open(in_pipe[1]);
+        close_if_open(out_pipe[0]); close_if_open(out_pipe[1]);
+        close_if_open(err_pipe[0]); close_if_open(err_pipe[1]);
         return -1;
     }
 
     pid_t pid = fork();
     if (pid < 0) {
         if (err_out) *err_out = strdup("fork() failed");
+        close_if_open(in_pipe[0]);  close_if_open(in_pipe[1]);
+        close_if_open(out_pipe[0]); close_if_open(out_pipe[1]);
+        close_if_open(err_pipe[0]); close_if_open(err_pipe[1]);
         return -1;
     }
 
@@ -280,7 +313,15 @@ static char *tool_exec_command(ToolCtx *ctx, cJSON *args) {
     char *stdin_str      = dup_or_default(cJSON_GetObjectItem(args, "stdin"), NULL);
     cJSON *timeout_j     = cJSON_GetObjectItem(args, "timeout_ms");
     int timeout_ms       = cJSON_IsNumber(timeout_j) ? (int)timeout_j->valueint : 30000;
-    int unsafe           = ctx->allow_unsafe_exec && (strcmp(profile, "none") == 0);
+    int unsafe           = ctx->allow_unsafe_exec && profile && (strcmp(profile, "none") == 0);
+    if (timeout_ms <= 0) timeout_ms = 30000;
+    if (timeout_ms > EXEC_TIMEOUT_MAX_MS) timeout_ms = EXEC_TIMEOUT_MAX_MS;
+
+    char *profile_err = validate_exec_profile(ctx, profile);
+    if (profile_err) {
+        free_argv(argv); free(cwd); free(profile); free(stdin_str);
+        return profile_err;
+    }
 
     char **env = json_to_env(cJSON_GetObjectItem(args, "env"));
 
@@ -470,7 +511,12 @@ static char *tool_spawn_bg(ToolCtx *ctx, cJSON *args) {
     char *cwd     = dup_or_default(cJSON_GetObjectItem(args, "cwd"), NULL);
     char *profile = dup_or_default(cJSON_GetObjectItem(args, "profile"), "default");
     char **env    = json_to_env(cJSON_GetObjectItem(args, "env"));
-    int unsafe    = ctx->allow_unsafe_exec && (strcmp(profile, "none") == 0);
+    int unsafe    = ctx->allow_unsafe_exec && profile && (strcmp(profile, "none") == 0);
+    char *profile_err = validate_exec_profile(ctx, profile);
+    if (profile_err) {
+        free_argv(argv); free_argv(env); free(cwd); free(profile);
+        return profile_err;
+    }
 
     int slot_idx = -1;
     for (int i = 0; i < BG_MAX; i++) {
@@ -519,6 +565,8 @@ static char *tool_bg_read(ToolCtx *ctx, cJSON *args) {
     cJSON *eoff_j = cJSON_GetObjectItem(args, "since_offset_stderr");
     cJSON *wait_j = cJSON_GetObjectItem(args, "wait_ms");
     int wait_ms = cJSON_IsNumber(wait_j) ? (int)wait_j->valueint : 0;
+    if (wait_ms < 0) wait_ms = 0;
+    if (wait_ms > BG_WAIT_MAX_MS) wait_ms = BG_WAIT_MAX_MS;
 
     BgSlot *s = bg_find(ctx->bg, (int)h_j->valueint);
     if (!s) return strdup("ERROR: no such bg handle");

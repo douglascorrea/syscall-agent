@@ -58,6 +58,11 @@ static char *tool_read_file(cJSON *args) {
         truncated = 1;
     }
     char *buf = malloc(to_read + 1);
+    if (!buf) {
+        fclose(f);
+        free(path);
+        return strdup("ERROR: out of memory");
+    }
     size_t n = fread(buf, 1, to_read, f);
     buf[n] = '\0';
     fclose(f);

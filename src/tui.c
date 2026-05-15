@@ -363,7 +363,13 @@ static void add_entry(TuiApp *app, EntryKind kind, const char *title, const char
     app->entries[app->len].kind = kind;
     app->entries[app->len].title = strdup(title ? title : "");
     app->entries[app->len].text = strdup(text ? text : "");
-    if (!app->entries[app->len].title || !app->entries[app->len].text) return;
+    if (!app->entries[app->len].title || !app->entries[app->len].text) {
+        free(app->entries[app->len].title);
+        free(app->entries[app->len].text);
+        app->entries[app->len].title = NULL;
+        app->entries[app->len].text = NULL;
+        return;
+    }
     app->len++;
 }
 
@@ -444,7 +450,7 @@ static void render_app(TuiApp *app) {
     printf("\x1b[0m\r\n");
 
     char header[1024];
-    snprintf(header, sizeof header, " low_level_agent  %s  verbose:%s%s",
+    snprintf(header, sizeof header, " syscall-agent  %s  verbose:%s%s",
         app->cfg->model ? app->cfg->model : "no-model",
         tui_verbose_name(app->cfg->verbose),
         app->running ? "  working" : "");

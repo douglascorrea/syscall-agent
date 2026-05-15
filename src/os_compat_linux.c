@@ -51,14 +51,15 @@ int os_list_processes(ProcInfo *procs, int max) {
     return out;
 }
 
-/* ---------- sandbox (Linux: stub for now) ----------
+/* ---------- sandbox ----------
  *
- * Real implementation would install a seccomp-bpf filter. For now we return
- * success but apply no restriction; this means Linux exec_command runs with
- * the agent's normal privileges. Documented in PLAN.md. */
+ * Linux confinement is intentionally fail-closed until a real seccomp/namespace
+ * implementation exists. Returning success here would make exec_command appear
+ * sandboxed while actually running with the agent's normal privileges.
+ */
 int os_apply_sandbox(const char *profile) {
-    (void)profile;
-    return 0;
+    if (profile && strcmp(profile, "none") == 0) return 0;
+    return -1;
 }
 
 /* ---------- watch_path via inotify ---------- */

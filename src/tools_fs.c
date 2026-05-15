@@ -152,6 +152,7 @@ static char *tool_write_file(cJSON *args) {
     char *content = dup_or_default(cJSON_GetObjectItem(args, "content"), NULL);
     cJSON *mode_j = cJSON_GetObjectItem(args, "mode");
     int mode = cJSON_IsNumber(mode_j) ? (int)mode_j->valueint : 0644;
+    mode &= 0777;
 
     if (!path || !content) {
         free(path); free(content);
@@ -161,6 +162,10 @@ static char *tool_write_file(cJSON *args) {
     /* derive temp template in same directory as target so rename() is atomic */
     char *path_copy = strdup(path);
     char *dir = strdup(path);
+    if (!path_copy || !dir) {
+        free(dir); free(path_copy); free(path); free(content);
+        return strdup("ERROR: out of memory");
+    }
     const char *slash = strrchr(dir, '/');
     if (slash) {
         ((char *)slash)[0] = '\0';
@@ -189,8 +194,20 @@ static char *tool_write_file(cJSON *args) {
         free(dir); free(path_copy); free(path); free(content);
         return b.data;
     }
-    fchmod(fd, (mode_t)mode);
-    close(fd);
+    if (fchmod(fd, (mode_t)mode) != 0) {
+        close(fd); unlink(tmpl);
+        Buf b; buf_init(&b);
+        buf_printf(&b, "ERROR: chmod failed: %s", strerror(errno));
+        free(dir); free(path_copy); free(path); free(content);
+        return b.data;
+    }
+    if (close(fd) != 0) {
+        unlink(tmpl);
+        Buf b; buf_init(&b);
+        buf_printf(&b, "ERROR: close failed: %s", strerror(errno));
+        free(dir); free(path_copy); free(path); free(content);
+        return b.data;
+    }
 
     if (rename(tmpl, path_copy) != 0) {
         unlink(tmpl);

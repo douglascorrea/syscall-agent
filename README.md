@@ -1,6 +1,43 @@
-# low_level_agent
+# syscall-agent
 
-A tiny AI agent written in pure **C**. Single binary, OpenRouter backend, syscall-backed tools, persistent memory in plain Markdown.
+`syscall-agent` is a compact coding agent written in pure **C**. It talks to
+OpenRouter, keeps durable memory in Markdown, and exposes local tools that lean
+on OS primitives such as `fork`, `execvp`, `mmap`, `rename`, `kqueue`,
+`inotify`, `getaddrinfo`, non-blocking sockets, and process-table syscalls.
+
+The goal is a small single-binary agent that can inspect code, edit files,
+perform network lookups, run bounded local commands, and stay usable from both
+plain CLI mode and a responsive Pi-style TUI.
+
+> [!IMPORTANT]
+> This is a local coding agent with powerful filesystem and optional process
+> execution tools. Run it in a repository or disposable workspace you trust.
+
+## Highlights
+
+- Pure C implementation with one generated binary.
+- OpenRouter chat-completions backend.
+- Tool-calling loop with file, web, memory, process, watch, and network tools.
+- Optional syscall-backed command execution with resource limits.
+- Atomic file writes via `mkstemp` + `rename`.
+- `mmap` range reads for large files and logs.
+- Persistent `MEMORY.md` with append locking.
+- Interactive `--tui` mode inspired by Pi Agent.
+- Focused regression tests for TUI commands, agent events, and security checks.
+
+## Requirements
+
+- macOS or Linux
+- C compiler with C11 support
+- `make`
+- `libcurl`
+- OpenRouter API key
+
+On macOS, `libcurl` is usually already available. On Debian/Ubuntu:
+
+```sh
+sudo apt-get install build-essential libcurl4-openssl-dev
+```
 
 ## Build
 
@@ -8,132 +45,196 @@ A tiny AI agent written in pure **C**. Single binary, OpenRouter backend, syscal
 make
 ```
 
-Requires `libcurl` (preinstalled on macOS). Outputs `build/agent`.
+The binary is written to:
 
-## Run
+```sh
+build/agent
+```
+
+Run the test suite:
+
+```sh
+make test
+```
+
+## Quick Start
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-# optional, otherwise search_web falls back to DuckDuckGo HTML
-export BRAVE_SEARCH_API_KEY=...
 
-./build/agent "summarize the files in this repo"
-./build/agent -s 20 -m anthropic/claude-3.5-sonnet "find the largest .c file and tell me what it does"
-echo "what is in MEMORY.md?" | ./build/agent
+./build/agent "summarize this repository"
+./build/agent -s 20 -m anthropic/claude-3.5-sonnet "find the largest C file and explain it"
+echo "what changed recently?" | ./build/agent
+```
+
+Open the TUI:
+
+```sh
 ./build/agent --tui
-
-# enable subprocess tools (default sandbox: read-only FS, no network)
-./build/agent --allow-exec "run 'git log -n 5 --oneline' and summarize"
 ```
 
-## Files
+Enable subprocess tools:
 
-The binary is self-contained. Two Markdown files live next to it and are read at runtime:
-
-- `SYSTEM_PROMPT.md` — base system prompt (loaded every run).
-- `MEMORY.md` — long-term memory; created/appended by the agent itself via `save_memory`. `flock`-protected, so multiple agents can write in parallel.
-
-Override paths with `--system PATH` / `--memory PATH` or the env vars `SYSTEM_PROMPT_PATH` / `MEMORY_PATH`.
-
-## Tools
-
-### Always available
-
-| Tool              | Purpose                                                                                                                              |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `read_file`       | Read a local file (≤ 256 KB).                                                                                                        |
-| `search_files`    | Recursively glob for filenames.                                                                                                      |
-| `search_web`      | Web search. Brave Search API (if `BRAVE_SEARCH_API_KEY`) → DuckDuckGo HTML fallback.                                                 |
-| `fetch_url`       | Raw HTTP GET.                                                                                                                        |
-| `web_fetch`       | HTTP GET with HTML → text stripping.                                                                                                 |
-| `save_memory`     | Append a note to `MEMORY.md`. `flock`-protected.                                                                                     |
-| `stat`            | File metadata (size, mode, mtime, type, symlink target) — no content read.                                                           |
-| `list_dir`        | Directory listing with each entry's type/size/mtime.                                                                                 |
-| `write_file`      | Atomic write via `mkstemp` + `rename` (no torn writes for concurrent readers).                                                       |
-| `read_file_range` | `mmap`-backed slice read for huge files.                                                                                             |
-| `dns_lookup`      | `getaddrinfo` → A / AAAA records.                                                                                                    |
-| `tcp_check`       | Non-blocking `connect()` probe: reachable / unreachable + duration.                                                                  |
-| `watch_path`      | Block until a path changes. macOS: `kqueue`. Linux: `inotify`. Hard cap 120 s.                                                       |
-| `list_processes`  | Top-N processes by RSS. macOS: `sysctl(KERN_PROC_ALL)`. Linux: walks `/proc`.                                                        |
-
-### Gated behind `--allow-exec`
-
-| Tool           | Purpose                                                                                                                                                                                                                              |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `exec_command` | `fork()` + per-call sandbox + `setrlimit` defaults + `execvp(argv)`. **argv-only, no shell.** Captures stdout/stderr/exit + `peak_mem_kb` via `getrusage`.                                                                           |
-| `spawn_bg`     | Same machinery, but returns a handle and runs in the background. Output buffered up to 256 KB per stream.                                                                                                                            |
-| `bg_read`      | Non-blocking read from a handle. Returns offsets so the next call resumes without re-reading.                                                                                                                                        |
-| `bg_kill`      | SIGTERM → SIGKILL after 2 s.                                                                                                                                                                                                         |
-| `bg_list`      | What's still running and how much output is buffered.                                                                                                                                                                                |
-
-### Sandbox profiles (per `exec_command` / `spawn_bg` call)
-
-Applied between `fork()` and `execvp()` via `sandbox_init(3)` on macOS (Linux is a stub for now).
-
-| Profile    | FS read | FS write           | Network          | Notes                                                          |
-| ---------- | ------- | ------------------ | ---------------- | -------------------------------------------------------------- |
-| `readonly` | yes     | `/dev/null` + tmp  | denied           | Safest. The command runs but can't write or talk to the net.   |
-| `default`  | yes     | `/dev/null` + tmp  | denied           | Default. Adds full process spawning for shell-driven workflows.|
-| `network`  | yes     | `/dev/null` + tmp  | allowed          | For curl, git fetch, dev servers, etc.                         |
-| `build`    | yes     | everywhere         | denied           | For make / compile loops. Best-effort.                         |
-| `none`     | —       | —                  | —                | No sandbox. Requires `--allow-unsafe-exec`.                    |
-
-### Resource limits applied to every exec/spawn
-
-`RLIMIT_CPU=30s`, `RLIMIT_AS=512 MB`, `RLIMIT_FSIZE=256 MB`, `RLIMIT_NOFILE=256`.
-
-## Flags
-
+```sh
+./build/agent --allow-exec "run the tests and summarize failures"
 ```
--s / --steps N        max agent-loop iterations (default 10)
--m / --model NAME     OpenRouter model id (default openai/gpt-4o-mini)
---tui                 open the Pi-style terminal UI
+
+## Configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Required OpenRouter API key. |
+| `OPENROUTER_MODEL` | Default model when `-m/--model` is not set. |
+| `BRAVE_SEARCH_API_KEY` | Optional Brave Search key; otherwise web search falls back to DuckDuckGo HTML. |
+| `SYSTEM_PROMPT_PATH` | Override `SYSTEM_PROMPT.md`. |
+| `MEMORY_PATH` | Override `MEMORY.md`. |
+| `LLA_ALLOW_EXEC=1` | Enable subprocess tools. |
+| `LLA_ALLOW_UNSAFE_EXEC=1` | Allow unsandboxed `profile=none`; implies exec tools. |
+
+Flags:
+
+```text
+--tui                 open the interactive terminal UI
+-s, --steps N         max agent-loop iterations (default 10)
+-m, --model NAME      OpenRouter model id (default openai/gpt-4o-mini)
 --system PATH         path to SYSTEM_PROMPT.md
 --memory PATH         path to MEMORY.md
 --allow-exec          enable exec_command, spawn_bg, bg_read, bg_kill, bg_list
---allow-unsafe-exec   also allow profile='none' (no sandbox). Implies --allow-exec.
--v / --verbose        trace tool calls to stderr
+--allow-unsafe-exec   also allow profile=none; implies --allow-exec
+-v, --verbose         trace tool calls to stderr in plain CLI mode
+-h, --help            show help
 ```
 
 ## TUI
 
-`./build/agent --tui` starts a responsive terminal UI inspired by Pi: full-width borders,
-muted status/footer lines, padded user blocks, and compact tool/reasoning panels.
+The TUI is intentionally small and terminal-native. It uses full-width accent
+borders, muted status/footer lines, padded user blocks, and compact tool or
+reasoning panels.
 
 Slash commands:
 
-- `/model` lists predefined OpenRouter model choices.
-- `/model N` or `/model provider/model-id` selects a predefined model.
-- `/verbose normal` shows only regular conversation text.
-- `/verbose tools` also shows tool calls and tool results.
-- `/verbose reasoning` also shows `reasoning`, `reasoning_content`, or `reasoning_details`
-  returned by models that support those fields.
-- `/verbose all` shows both tools and reasoning.
-- `/new` clears the visible transcript.
-- `/exit` leaves the TUI.
+| Command | Behavior |
+| --- | --- |
+| `/model` | List predefined OpenRouter model choices. |
+| `/model N` | Select a model by list index. |
+| `/model provider/model-id` | Select a predefined model by id. |
+| `/verbose normal` | Show only user and assistant conversation text. |
+| `/verbose tools` | Also show tool calls and tool results. |
+| `/verbose reasoning` | Also show model reasoning fields when returned. |
+| `/verbose reasioning` | Accepted alias for the original requested spelling. |
+| `/verbose all` | Show tools and reasoning output. |
+| `/new` | Clear the visible transcript. |
+| `/exit` | Leave the TUI. |
 
-`LLA_ALLOW_EXEC=1` and `LLA_ALLOW_UNSAFE_EXEC=1` work the same way.
+Reasoning display supports OpenRouter-style `reasoning`, `reasoning_content`,
+and `reasoning_details` fields when the selected model returns them.
 
-## Layout
+## Tools
 
+Always available:
+
+| Tool | Capability |
+| --- | --- |
+| `read_file` | Read up to 256 KB from a local file. |
+| `search_files` | Recursively search filenames by glob or substring. |
+| `search_web` | Brave Search or DuckDuckGo HTML search. |
+| `fetch_url` | HTTP/HTTPS GET with raw response output. |
+| `web_fetch` | HTTP/HTTPS GET with HTML stripped to text. |
+| `save_memory` | Append durable notes to `MEMORY.md`. |
+| `stat` | Inspect metadata without reading file content. |
+| `list_dir` | List directory entries with type, size, and mtime. |
+| `write_file` | Atomic file replacement using a same-directory temp file. |
+| `read_file_range` | `mmap`-backed byte-range read for large files. |
+| `dns_lookup` | Resolve A and AAAA records through `getaddrinfo`. |
+| `tcp_check` | Non-blocking TCP reachability probe with duration. |
+| `watch_path` | Wait for file or directory changes. |
+| `list_processes` | List top processes by RSS. |
+
+Gated by `--allow-exec`:
+
+| Tool | Capability |
+| --- | --- |
+| `exec_command` | Run an argv-only command, capture stdout/stderr, enforce rlimits. |
+| `spawn_bg` | Start a background command and return a handle. |
+| `bg_read` | Read buffered background output by offset. |
+| `bg_kill` | Terminate a background process. |
+| `bg_list` | List background processes owned by this agent. |
+
+`exec_command` and `spawn_bg` never invoke a shell. The model must provide an
+argv array, so shell metacharacters are ordinary arguments unless the chosen
+executable is itself a shell.
+
+## Execution Safety
+
+Every subprocess gets these resource limits:
+
+| Limit | Value |
+| --- | --- |
+| CPU time | 30 seconds |
+| Address space | 512 MB |
+| Output file size | 256 MB |
+| Open files | 256 |
+| Captured stdout/stderr | 256 KB per stream |
+
+Sandbox profiles:
+
+| Profile | macOS behavior | Linux behavior |
+| --- | --- | --- |
+| `readonly` | Read filesystem, write only tmp/devnull paths, no network. | Fails closed until Linux sandboxing is implemented. |
+| `default` | Read filesystem, process spawning, write only tmp/devnull paths, no network. | Fails closed until Linux sandboxing is implemented. |
+| `network` | `default` plus outbound network. | Fails closed until Linux sandboxing is implemented. |
+| `build` | Filesystem writes allowed for build loops, no network. | Fails closed until Linux sandboxing is implemented. |
+| `none` | No sandbox; requires `--allow-unsafe-exec`. | No sandbox; requires `--allow-unsafe-exec`. |
+
+HTTP tools accept only `http://` and `https://` URLs. `write_file` masks mode
+bits to regular permission bits so tool calls cannot request setuid/setgid
+outputs.
+
+## Memory
+
+The agent reads `SYSTEM_PROMPT.md` and `MEMORY.md` at startup. `MEMORY.md` is
+created on first use and appended through `save_memory`.
+
+Override paths:
+
+```sh
+./build/agent --system prompts/system.md --memory state/MEMORY.md "use this context"
 ```
+
+## Repository Layout
+
+```text
 src/
-  main.c                 # CLI entry + flag parsing
-  agent.c                # agent loop, message history, timing metadata
-  openrouter.c           # OpenRouter chat completions client
-  tools.c                # tool registration + top-level dispatch
-  tools_fs.c             # stat, list_dir, write_file, read_file_range
-  tools_proc.c           # exec_command, spawn_bg/read/kill/list, list_processes
-  tools_watch.c          # watch_path
-  tools_net.c            # dns_lookup, tcp_check
-  os_compat.h            # cross-platform shim
-  os_compat_darwin.c     # kqueue, sandbox_init, sysctl
-  os_compat_linux.c      # inotify, /proc walker, seccomp stub
-  memory.c               # MEMORY.md read/append with flock
-  http.c                 # libcurl wrapper
-  util.c                 # Buf, URL encode, HTML strip
-vendor/cJSON.c           # JSON library
-Makefile
-SYSTEM_PROMPT.md
-MEMORY.md                # created on first save_memory call
+  main.c                 CLI entry and flag parsing
+  agent.c                tool-calling loop and event emission
+  openrouter.c           OpenRouter request/response handling
+  tui.c                  raw terminal UI
+  tools.c                shared tool registration and dispatch
+  tools_fs.c             stat, list_dir, write_file, read_file_range
+  tools_proc.c           exec, background process, process listing
+  tools_watch.c          kqueue/inotify path watching
+  tools_net.c            DNS and TCP probes
+  os_compat_*.c          platform-specific syscall shims
+  memory.c               Markdown memory loading/appending
+  http.c                 libcurl wrapper
+vendor/
+  cJSON.c                vendored JSON parser
+tests/
+  *_test.c               focused regression tests
+```
+
+## Development
+
+```sh
+make clean
+make
+make test
+```
+
+Useful smoke checks:
+
+```sh
+./build/agent --help
+./build/agent -m openai/gpt-4o-mini -s 3 "Reply with OK only"
+./build/agent --tui
 ```

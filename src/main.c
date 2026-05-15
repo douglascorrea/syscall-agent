@@ -9,7 +9,7 @@
 
 static void usage(const char *argv0) {
     fprintf(stderr,
-        "low_level_agent — a single-binary AI agent in C\n"
+        "syscall-agent — a single-binary coding agent in C\n"
         "\n"
         "USAGE:\n"
         "  %s [options] [PROMPT]\n"
@@ -26,7 +26,8 @@ static void usage(const char *argv0) {
         "      --memory PATH     Path to MEMORY.md (default ./MEMORY.md\n"
         "                        or $MEMORY_PATH)\n"
         "      --allow-exec      Enable exec_command and spawn_bg tools\n"
-        "                        (sandboxed by default).\n"
+        "                        (sandboxed by default on macOS; Linux fails closed\n"
+        "                        until sandbox support exists).\n"
         "      --allow-unsafe-exec\n"
         "                        Allow profile='none' in exec/spawn_bg (no sandbox).\n"
         "                        Implies --allow-exec.\n"

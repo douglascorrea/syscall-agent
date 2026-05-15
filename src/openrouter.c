@@ -34,8 +34,8 @@ cJSON *openrouter_chat(const char *api_key,
 
     const char *headers[] = {
         auth.data,
-        "HTTP-Referer: https://github.com/local/low_level_agent",
-        "X-Title: low_level_agent",
+        "HTTP-Referer: https://github.com/douglascorrea/syscall-agent",
+        "X-Title: syscall-agent",
         NULL
     };
 
