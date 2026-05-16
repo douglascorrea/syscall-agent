@@ -777,7 +777,7 @@ void tools_proc_register(cJSON *arr, int allow_exec) {
 char *tools_proc_dispatch(ToolCtx *ctx, const char *name, cJSON *args) {
     if (!name) return NULL;
     if (strcmp(name, "list_processes") == 0) return tool_list_processes(args);
-    if (!ctx->allow_exec) return NULL;
+    if (!ctx || !ctx->allow_exec) return NULL;
     if (strcmp(name, "exec_command") == 0) return tool_exec_command(ctx, args);
     if (strcmp(name, "spawn_bg") == 0)     return tool_spawn_bg(ctx, args);
     if (strcmp(name, "bg_read") == 0)      return tool_bg_read(ctx, args);

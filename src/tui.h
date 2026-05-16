@@ -18,7 +18,11 @@ typedef enum {
     TUI_CMD_HELP,
     TUI_CMD_MODELS,
     TUI_CMD_MODEL,
-    TUI_CMD_VERBOSE
+    TUI_CMD_VERBOSE,
+    TUI_CMD_TOOLS,
+    TUI_CMD_SKILLS,
+    TUI_CMD_AUTH,
+    TUI_CMD_SYSINFO
 } TuiCommandType;
 
 typedef struct {
