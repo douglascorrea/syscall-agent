@@ -126,6 +126,11 @@ The TUI is intentionally small and terminal-native. It uses full-width accent
 borders, muted status/footer lines, padded user blocks, and compact tool or
 reasoning panels.
 
+In TUI mode, model responses use OpenRouter streaming. Assistant text appears as
+it arrives. Tool-call deltas appear in real time when `/verbose tools` or
+`/verbose all` is enabled, and reasoning deltas appear in real time when
+`/verbose reasoning` or `/verbose all` is enabled.
+
 Slash commands:
 
 | Command | Behavior |
@@ -158,7 +163,8 @@ Model picker controls:
 | Ctrl-R | Refresh the OpenRouter model catalog. |
 
 Reasoning display supports OpenRouter-style `reasoning`, `reasoning_content`,
-and `reasoning_details` fields when the selected model returns them.
+and `reasoning_details` fields when the selected model returns them, including
+streamed `choices[].delta.reasoning_details` chunks.
 
 ## Tools
 
@@ -269,6 +275,9 @@ Every subprocess gets these resource limits:
 | Output file size | 256 MB |
 | Open files | 256 |
 | Captured stdout/stderr | 256 KB per stream |
+
+OpenRouter SSE streaming is only enabled for the interactive TUI. Plain CLI mode
+keeps the one-shot response path unless a future flag enables stream printing.
 
 Sandbox profiles:
 

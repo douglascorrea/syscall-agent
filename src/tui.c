@@ -79,6 +79,7 @@ typedef struct {
     size_t model_selected;
     size_t model_scroll;
     char *owned_model_id;
+    AgentConversation *conversation;
 } TuiApp;
 
 typedef enum {
@@ -419,6 +420,26 @@ static void add_entry(TuiApp *app, EntryKind kind, const char *title, const char
         return;
     }
     app->len++;
+}
+
+static void append_entry_delta(TuiApp *app, EntryKind kind, const char *title, const char *delta) {
+    const char *safe_title = title ? title : "";
+    const char *safe_delta = delta ? delta : "";
+    if (app->len > 0) {
+        TuiEntry *last = &app->entries[app->len - 1];
+        if (last->kind == kind && last->title && strcmp(last->title, safe_title) == 0) {
+            size_t old_len = last->text ? strlen(last->text) : 0;
+            size_t add_len = strlen(safe_delta);
+            char *next = malloc(old_len + add_len + 1);
+            if (!next) return;
+            if (old_len) memcpy(next, last->text, old_len);
+            memcpy(next + old_len, safe_delta, add_len + 1);
+            free(last->text);
+            last->text = next;
+            return;
+        }
+    }
+    add_entry(app, kind, safe_title, safe_delta);
 }
 
 static void clear_entries(TuiApp *app) {
@@ -924,6 +945,7 @@ static void handle_command(TuiApp *app, const char *line) {
 
     if (cmd.type == TUI_CMD_NEW) {
         clear_entries(app);
+        agent_conversation_reset(app->conversation, app->cfg);
         add_welcome(app);
         snprintf(app->status, sizeof app->status, "new session");
     } else if (cmd.type == TUI_CMD_EXIT) {
@@ -984,14 +1006,23 @@ static void on_agent_event(const AgentEvent *event, void *userdata) {
         case AGENT_EVENT_TOOL_CALL:
             add_entry(app, ENTRY_TOOL, event->title ? event->title : "tool", event->content ? event->content : "");
             break;
+        case AGENT_EVENT_TOOL_CALL_DELTA:
+            append_entry_delta(app, ENTRY_TOOL, event->title ? event->title : "tool call", event->content ? event->content : "");
+            break;
         case AGENT_EVENT_TOOL_RESULT:
             add_entry(app, ENTRY_TOOL, event->title ? event->title : "tool result", event->content ? event->content : "");
             break;
         case AGENT_EVENT_REASONING:
             add_entry(app, ENTRY_REASONING, "reasoning", event->content ? event->content : "");
             break;
+        case AGENT_EVENT_REASONING_DELTA:
+            append_entry_delta(app, ENTRY_REASONING, "reasoning", event->content ? event->content : "");
+            break;
         case AGENT_EVENT_ASSISTANT:
             add_entry(app, ENTRY_ASSISTANT, "assistant", event->content ? event->content : "");
+            break;
+        case AGENT_EVENT_ASSISTANT_DELTA:
+            append_entry_delta(app, ENTRY_ASSISTANT, "assistant", event->content ? event->content : "");
             break;
         case AGENT_EVENT_ERROR:
             add_entry(app, ENTRY_ERROR, event->title ? event->title : "error", event->content ? event->content : "");
@@ -1023,7 +1054,8 @@ static void submit_line(TuiApp *app) {
     app->running = 1;
     snprintf(app->status, sizeof app->status, "working");
     render_app(app);
-    int rc = agent_run_with_events(app->cfg, trimmed, on_agent_event, app);
+    int rc = agent_conversation_run_with_events(
+        app->conversation, app->cfg, trimmed, on_agent_event, app);
     app->running = 0;
     if (rc == 0) {
         snprintf(app->status, sizeof app->status, "ready");
@@ -1150,8 +1182,16 @@ int tui_run(AgentConfig *cfg) {
     app.cfg = cfg;
     openrouter_model_catalog_init(&app.model_catalog);
     snprintf(app.status, sizeof app.status, "ready");
+    app.conversation = agent_conversation_new(cfg);
+    if (!app.conversation) {
+        fprintf(stderr, "ERROR: could not initialize TUI conversation\n");
+        return 2;
+    }
 
-    if (enable_raw(&app) != 0) return 2;
+    if (enable_raw(&app) != 0) {
+        agent_conversation_free(app.conversation);
+        return 2;
+    }
     signal(SIGWINCH, on_sigwinch);
     add_welcome(&app);
     render_app(&app);
@@ -1187,6 +1227,7 @@ int tui_run(AgentConfig *cfg) {
     openrouter_model_catalog_free(&app.model_catalog);
     free(app.model_matches);
     free(app.owned_model_id);
+    agent_conversation_free(app.conversation);
     free_entries(&app);
     return 0;
 }

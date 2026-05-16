@@ -139,6 +139,7 @@ int main(int argc, char **argv) {
     }
 
     http_global_init();
+    if (use_tui) cfg.stream = 1;
     int rc = use_tui ? tui_run(&cfg) : agent_run(&cfg, prompt);
     http_global_cleanup();
 

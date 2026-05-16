@@ -8,6 +8,7 @@ typedef struct {
     const char *memory_path;
     int max_steps;
     int verbose;
+    int stream;
     int allow_exec;
     int allow_unsafe_exec;
 } AgentConfig;
@@ -22,7 +23,10 @@ typedef enum {
     AGENT_EVENT_TOOL_CALL,
     AGENT_EVENT_TOOL_RESULT,
     AGENT_EVENT_REASONING,
+    AGENT_EVENT_REASONING_DELTA,
     AGENT_EVENT_ASSISTANT,
+    AGENT_EVENT_ASSISTANT_DELTA,
+    AGENT_EVENT_TOOL_CALL_DELTA,
     AGENT_EVENT_ERROR
 } AgentEventType;
 
@@ -33,6 +37,18 @@ typedef struct {
 } AgentEvent;
 
 typedef void (*AgentEventHandler)(const AgentEvent *event, void *userdata);
+
+typedef struct AgentConversation AgentConversation;
+
+AgentConversation *agent_conversation_new(const AgentConfig *cfg);
+void agent_conversation_reset(AgentConversation *conv, const AgentConfig *cfg);
+void agent_conversation_free(AgentConversation *conv);
+
+int agent_conversation_run_with_events(AgentConversation *conv,
+                                       const AgentConfig *cfg,
+                                       const char *user_prompt,
+                                       AgentEventHandler handler,
+                                       void *userdata);
 
 /* Runs the agent for a single user prompt. Returns 0 on success, non-zero on error. */
 int agent_run(const AgentConfig *cfg, const char *user_prompt);

@@ -40,10 +40,7 @@ static struct curl_slist *build_headers(const char *const *headers) {
     return list;
 }
 
-static HttpResponse perform(CURL *c) {
-    HttpResponse r = {0};
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &r);
+static void set_common_options(CURL *c) {
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 60L);
@@ -52,6 +49,13 @@ static HttpResponse perform(CURL *c) {
      * A bare "Mozilla/5.0" is consistently accepted. */
     curl_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0");
     curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
+}
+
+static HttpResponse perform(CURL *c) {
+    HttpResponse r = {0};
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &r);
+    set_common_options(c);
     CURLcode rc = curl_easy_perform(c);
     if (rc != CURLE_OK) {
         r.error = strdup(curl_easy_strerror(rc));
@@ -117,6 +121,39 @@ HttpResponse http_post_form(const char *url, const char *body, const char *const
     curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, list);
     r = perform(c);
+    curl_slist_free_all(list);
+    curl_easy_cleanup(c);
+    return r;
+}
+
+HttpResponse http_post_json_stream(const char *url,
+                                   const char *body,
+                                   const char *const *headers,
+                                   HttpStreamWriteFn write_fn,
+                                   void *userdata) {
+    HttpResponse r = {0};
+    if (!is_http_url(url)) {
+        r.error = strdup("unsupported URL scheme; only http:// and https:// are allowed");
+        return r;
+    }
+    CURL *c = curl_easy_init();
+    if (!c) { r.error = strdup("curl init failed"); return r; }
+    struct curl_slist *list = curl_slist_append(NULL, "Content-Type: application/json");
+    if (headers) {
+        for (size_t i = 0; headers[i]; i++) list = curl_slist_append(list, headers[i]);
+    }
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_POST, 1L);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER, list);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_fn);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, userdata);
+    set_common_options(c);
+    CURLcode rc = curl_easy_perform(c);
+    if (rc != CURLE_OK) {
+        r.error = strdup(curl_easy_strerror(rc));
+    }
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &r.status);
     curl_slist_free_all(list);
     curl_easy_cleanup(c);
     return r;

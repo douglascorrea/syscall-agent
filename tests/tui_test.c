@@ -4,10 +4,26 @@
 #include <stdlib.h>
 #include <string.h>
 
-int agent_run_with_events(const AgentConfig *cfg,
-                          const char *user_prompt,
-                          AgentEventHandler handler,
-                          void *userdata) {
+AgentConversation *agent_conversation_new(const AgentConfig *cfg) {
+    (void)cfg;
+    return (AgentConversation *)1;
+}
+
+void agent_conversation_reset(AgentConversation *conv, const AgentConfig *cfg) {
+    (void)conv;
+    (void)cfg;
+}
+
+void agent_conversation_free(AgentConversation *conv) {
+    (void)conv;
+}
+
+int agent_conversation_run_with_events(AgentConversation *conv,
+                                       const AgentConfig *cfg,
+                                       const char *user_prompt,
+                                       AgentEventHandler handler,
+                                       void *userdata) {
+    (void)conv;
     (void)cfg;
     (void)user_prompt;
     (void)handler;

@@ -54,6 +54,40 @@ static cJSON *build_user_message(const char *prompt) {
     return msg;
 }
 
+struct AgentConversation {
+    cJSON *messages;
+};
+
+static cJSON *build_initial_messages(const AgentConfig *cfg) {
+    cJSON *messages = cJSON_CreateArray();
+    if (!messages) return NULL;
+    cJSON_AddItemToArray(messages, build_system_message(cfg));
+    return messages;
+}
+
+AgentConversation *agent_conversation_new(const AgentConfig *cfg) {
+    AgentConversation *conv = calloc(1, sizeof *conv);
+    if (!conv) return NULL;
+    conv->messages = build_initial_messages(cfg);
+    if (!conv->messages) {
+        free(conv);
+        return NULL;
+    }
+    return conv;
+}
+
+void agent_conversation_reset(AgentConversation *conv, const AgentConfig *cfg) {
+    if (!conv) return;
+    cJSON_Delete(conv->messages);
+    conv->messages = build_initial_messages(cfg);
+}
+
+void agent_conversation_free(AgentConversation *conv) {
+    if (!conv) return;
+    cJSON_Delete(conv->messages);
+    free(conv);
+}
+
 static void log_step_header(int step, int max, int verbose) {
     if (verbose) {
         fprintf(stderr, "\n=== step %d/%d ===\n", step + 1, max);
@@ -87,6 +121,50 @@ static void emit_event(AgentEventHandler handler, void *userdata,
         .content = content
     };
     handler(&ev, userdata);
+}
+
+typedef struct {
+    AgentEventHandler handler;
+    void *userdata;
+    int verbose;
+} AgentStreamForwarder;
+
+static void on_openrouter_stream(const OpenRouterStreamEvent *event, void *userdata) {
+    AgentStreamForwarder *f = userdata;
+    if (!event || !f) return;
+    switch (event->type) {
+        case OPENROUTER_STREAM_CONTENT_DELTA:
+            emit_event(f->handler, f->userdata, AGENT_EVENT_ASSISTANT_DELTA,
+                "assistant", event->content ? event->content : "");
+            break;
+        case OPENROUTER_STREAM_REASONING_DELTA:
+            if ((f->verbose & AGENT_VERBOSE_REASONING) != 0) {
+                emit_event(f->handler, f->userdata, AGENT_EVENT_REASONING_DELTA,
+                    "reasoning", event->content ? event->content : "");
+            }
+            break;
+        case OPENROUTER_STREAM_TOOL_CALL_DELTA:
+            if ((f->verbose & AGENT_VERBOSE_TOOLS) != 0) {
+                Buf b;
+                buf_init(&b);
+                if (event->tool_name && *event->tool_name) {
+                    buf_printf(&b, "%s", event->tool_name);
+                } else {
+                    buf_printf(&b, "tool[%d]", event->tool_index);
+                }
+                if (event->tool_arguments_delta && *event->tool_arguments_delta) {
+                    buf_printf(&b, " %s", event->tool_arguments_delta);
+                }
+                emit_event(f->handler, f->userdata, AGENT_EVENT_TOOL_CALL_DELTA,
+                    "tool call", b.data ? b.data : "");
+                buf_free(&b);
+            }
+            break;
+        case OPENROUTER_STREAM_ERROR:
+            emit_event(f->handler, f->userdata, AGENT_EVENT_ERROR,
+                "stream", event->content ? event->content : "stream error");
+            break;
+    }
 }
 
 static char *extract_reasoning_text(cJSON *message) {
@@ -131,14 +209,10 @@ static char *extract_reasoning_text(cJSON *message) {
     return NULL;
 }
 
-int agent_run_with_events(const AgentConfig *cfg,
-                          const char *user_prompt,
-                          AgentEventHandler handler,
-                          void *userdata) {
-    cJSON *messages = cJSON_CreateArray();
-    cJSON_AddItemToArray(messages, build_system_message(cfg));
-    cJSON_AddItemToArray(messages, build_user_message(user_prompt));
-
+static int agent_run_messages_with_events(const AgentConfig *cfg,
+                                          cJSON *messages,
+                                          AgentEventHandler handler,
+                                          void *userdata) {
     ToolCtx ctx = {
         .memory_path       = cfg->memory_path,
         .allow_exec        = cfg->allow_exec,
@@ -157,12 +231,27 @@ int agent_run_with_events(const AgentConfig *cfg,
             emit_event(handler, userdata, AGENT_EVENT_STATUS, "agent", status);
         }
 
-        cJSON *resp = openrouter_chat(
-            cfg->api_key,
-            cfg->model,
-            messages,
-            tools,
-            (cfg->verbose & AGENT_VERBOSE_REASONING) != 0);
+        int use_stream = cfg->stream && handler;
+        AgentStreamForwarder forwarder = {
+            .handler = handler,
+            .userdata = userdata,
+            .verbose = cfg->verbose
+        };
+        cJSON *resp = use_stream
+            ? openrouter_chat_stream(
+                cfg->api_key,
+                cfg->model,
+                messages,
+                tools,
+                (cfg->verbose & AGENT_VERBOSE_REASONING) != 0,
+                on_openrouter_stream,
+                &forwarder)
+            : openrouter_chat(
+                cfg->api_key,
+                cfg->model,
+                messages,
+                tools,
+                (cfg->verbose & AGENT_VERBOSE_REASONING) != 0);
         if (!resp) {
             fprintf(stderr, "agent: no response\n");
             emit_event(handler, userdata, AGENT_EVENT_ERROR, "agent", "no response");
@@ -275,7 +364,9 @@ int agent_run_with_events(const AgentConfig *cfg,
         }
 
         /* No tool calls — assistant gave a final text response. */
-        if (cJSON_IsString(content) && content->valuestring) {
+        if (use_stream && cJSON_IsString(content) && content->valuestring && *content->valuestring) {
+            /* Content deltas were already emitted as they arrived. */
+        } else if (cJSON_IsString(content) && content->valuestring) {
             if (handler) {
                 emit_event(handler, userdata, AGENT_EVENT_ASSISTANT,
                     "assistant", content->valuestring);
@@ -301,9 +392,37 @@ int agent_run_with_events(const AgentConfig *cfg,
     rc = 2;
 
 done:
-    cJSON_Delete(messages);
     cJSON_Delete(tools);
     if (ctx.bg) bg_table_free_kill_all(ctx.bg);
+    return rc;
+}
+
+int agent_conversation_run_with_events(AgentConversation *conv,
+                                       const AgentConfig *cfg,
+                                       const char *user_prompt,
+                                       AgentEventHandler handler,
+                                       void *userdata) {
+    if (!conv || !conv->messages) {
+        emit_event(handler, userdata, AGENT_EVENT_ERROR,
+            "agent", "conversation is not initialized");
+        return 1;
+    }
+    cJSON_AddItemToArray(conv->messages, build_user_message(user_prompt));
+    return agent_run_messages_with_events(cfg, conv->messages, handler, userdata);
+}
+
+int agent_run_with_events(const AgentConfig *cfg,
+                          const char *user_prompt,
+                          AgentEventHandler handler,
+                          void *userdata) {
+    AgentConversation *conv = agent_conversation_new(cfg);
+    if (!conv) {
+        emit_event(handler, userdata, AGENT_EVENT_ERROR,
+            "agent", "could not initialize conversation");
+        return 1;
+    }
+    int rc = agent_conversation_run_with_events(conv, cfg, user_prompt, handler, userdata);
+    agent_conversation_free(conv);
     return rc;
 }
 

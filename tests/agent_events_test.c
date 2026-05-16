@@ -1,4 +1,5 @@
 #include "agent.h"
+#include "openrouter.h"
 #include "tools.h"
 #include "../vendor/cJSON.h"
 
@@ -80,6 +81,23 @@ cJSON *openrouter_chat(const char *api_key,
         cJSON_AddStringToObject(message, "content", "final answer");
     }
     return make_response(message);
+}
+
+cJSON *openrouter_chat_stream(const char *api_key,
+                              const char *model,
+                              cJSON *messages,
+                              cJSON *tools,
+                              int want_reasoning,
+                              OpenRouterStreamHandler handler,
+                              void *userdata) {
+    (void)api_key;
+    (void)model;
+    (void)messages;
+    (void)tools;
+    (void)want_reasoning;
+    (void)handler;
+    (void)userdata;
+    return NULL;
 }
 
 static void record_event(const AgentEvent *event, void *userdata) {

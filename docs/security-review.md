@@ -13,7 +13,8 @@ implementation keeps arbitrary subprocess tools gated, keeps Linux sandboxing
 fail-closed, rejects non-HTTP(S) fetches, masks special mode bits on writes,
 redacts secret-like environment variables, runs Termux integrations through
 fixed argv-only commands, and uses the OpenRouter API key only as a bearer token
-for OpenRouter API calls.
+for OpenRouter API calls. TUI streaming now surfaces model output incrementally
+but does not add a new credential storage surface.
 
 ## Critical
 
@@ -134,6 +135,26 @@ Evidence:
 - The Authorization header is constructed only for the request and is not
   persisted or displayed: `src/openrouter_models.c:129`,
   `src/openrouter_models.c:133`.
+
+### L-5: Streaming exposes partial model output earlier
+
+Impact: TUI streaming displays assistant, reasoning, and tool-call deltas before
+the final response is complete. This improves observability, but partial output
+can include intermediate reasoning/tool arguments that would previously only be
+visible after request completion.
+
+Status: Accepted and controlled through the existing TUI verbosity modes.
+
+Evidence:
+
+- TUI mode enables streaming before entering the interactive loop:
+  `src/main.c:142`.
+- Assistant text deltas are always rendered; reasoning and tool-call deltas are
+  gated by the existing verbose reasoning/tools flags:
+  `src/agent.c:136`, `src/agent.c:140`, `src/agent.c:146`.
+- Streaming uses the same OpenRouter bearer auth as non-streaming calls and
+  does not persist headers or API keys: `src/openrouter.c:29`,
+  `src/openrouter.c:327`.
 
 ## Verification
 

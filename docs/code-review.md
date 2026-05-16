@@ -2,8 +2,8 @@
 
 Date: 2026-05-16
 
-Scope: current `master` tree after adding the live OpenRouter model picker and
-model catalog helpers.
+Scope: current tree after adding TUI conversation state and OpenRouter
+streaming support.
 
 ## Findings
 
@@ -24,6 +24,15 @@ No blocking correctness, security, or regression findings remain open.
 - The model catalog parser is isolated in `openrouter_models.c` and covered by
   `openrouter_models_test`, including response parsing and case-insensitive
   filtering.
+- TUI prompts now run against a reusable `AgentConversation`, so previous user,
+  assistant, and tool messages stay in the model context until `/new`.
+- TUI mode enables OpenRouter SSE streaming. Assistant text deltas, reasoning
+  deltas, and tool-call argument deltas are forwarded through agent events as
+  they arrive, while the final accumulated assistant message is still appended
+  to conversation history for tool execution and follow-up turns.
+- `agent_conversation_test` covers multi-turn context retention and reset.
+- `agent_streaming_test` covers streamed assistant, reasoning, and tool-call
+  deltas before tool execution.
 - `grep_text` output is capped by result count and per-line bytes to avoid
   pathological large-line output.
 - The README and system prompt have both been updated so the model-facing and
@@ -53,6 +62,9 @@ No blocking correctness, security, or regression findings remain open.
 - The model picker performs a synchronous catalog fetch in the TUI thread. That
   keeps the implementation simple, but the UI can pause briefly while
   OpenRouter responds.
+- Streaming still depends on provider behavior. Some providers may buffer tool
+  calls or reasoning chunks before OpenRouter receives them; the agent displays
+  deltas as soon as OpenRouter sends them.
 
 ## Verification
 

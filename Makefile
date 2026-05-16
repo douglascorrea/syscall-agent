@@ -54,13 +54,16 @@ clean:
 run: $(BIN)
 	./$(BIN) $(ARGS)
 
-test: $(BUILD)/tui_test $(BUILD)/agent_events_test $(BUILD)/security_test $(BUILD)/tools_meta_test $(BUILD)/tools_termux_test $(BUILD)/openrouter_models_test
+test: $(BUILD)/tui_test $(BUILD)/agent_events_test $(BUILD)/agent_conversation_test $(BUILD)/agent_streaming_test $(BUILD)/security_test $(BUILD)/tools_meta_test $(BUILD)/tools_termux_test $(BUILD)/openrouter_models_test $(BUILD)/openrouter_stream_test
 	./$(BUILD)/tui_test
 	./$(BUILD)/agent_events_test
+	./$(BUILD)/agent_conversation_test
+	./$(BUILD)/agent_streaming_test
 	./$(BUILD)/security_test
 	./$(BUILD)/tools_meta_test
 	./$(BUILD)/tools_termux_test
 	./$(BUILD)/openrouter_models_test
+	./$(BUILD)/openrouter_stream_test
 
 $(BUILD)/tui_test: tests/tui_test.c src/tui.c src/openrouter_models.c src/http.c src/util.c vendor/cJSON.c
 	@mkdir -p $(dir $@)
@@ -69,6 +72,14 @@ $(BUILD)/tui_test: tests/tui_test.c src/tui.c src/openrouter_models.c src/http.c
 $(BUILD)/agent_events_test: tests/agent_events_test.c src/agent.c src/util.c vendor/cJSON.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCS) tests/agent_events_test.c src/agent.c src/util.c vendor/cJSON.c -o $@
+
+$(BUILD)/agent_conversation_test: tests/agent_conversation_test.c src/agent.c src/util.c vendor/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCS) tests/agent_conversation_test.c src/agent.c src/util.c vendor/cJSON.c -o $@
+
+$(BUILD)/agent_streaming_test: tests/agent_streaming_test.c src/agent.c src/util.c vendor/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCS) tests/agent_streaming_test.c src/agent.c src/util.c vendor/cJSON.c -o $@
 
 $(BUILD)/security_test: tests/security_test.c src/tools_proc.c src/tools_fs.c src/http.c src/util.c vendor/cJSON.c
 	@mkdir -p $(dir $@)
@@ -85,3 +96,7 @@ $(BUILD)/tools_termux_test: tests/tools_termux_test.c src/tools.c src/tools_meta
 $(BUILD)/openrouter_models_test: tests/openrouter_models_test.c src/openrouter_models.c src/http.c src/util.c vendor/cJSON.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCS) tests/openrouter_models_test.c src/openrouter_models.c src/http.c src/util.c vendor/cJSON.c $(LDLIBS) -o $@
+
+$(BUILD)/openrouter_stream_test: tests/openrouter_stream_test.c src/openrouter.c src/util.c vendor/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCS) tests/openrouter_stream_test.c src/openrouter.c src/util.c vendor/cJSON.c -o $@
