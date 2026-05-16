@@ -526,7 +526,7 @@ cJSON *tools_describe(const ToolCtx *ctx) {
     }
 
     tools_fs_register(arr);
-    tools_meta_register(arr);
+    tools_meta_register(arr, ctx ? ctx->allow_exec : 0);
     tools_proc_register(arr, ctx ? ctx->allow_exec : 0);
     tools_watch_register(arr);
     tools_net_register(arr);

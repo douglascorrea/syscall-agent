@@ -176,10 +176,18 @@ Gated by `--allow-exec`:
 | `bg_read` | Read buffered background output by offset. |
 | `bg_kill` | Terminate a background process. |
 | `bg_list` | List background processes owned by this agent. |
+| `delegate_codex` | Delegate to the official Codex CLI using its own supported auth. |
+| `delegate_copilot` | Delegate to the official GitHub Copilot CLI using its own supported auth. |
 
 `exec_command` and `spawn_bg` never invoke a shell. The model must provide an
 argv array, so shell metacharacters are ordinary arguments unless the chosen
 executable is itself a shell.
+
+Delegation tools are also gated by `--allow-exec`. They invoke official local
+CLIs (`codex exec` and `copilot -p`) through argv-only `fork`/`execvp`, so users
+can use Codex OAuth or GitHub Copilot subscription authentication without
+`syscall-agent` reading or reusing private tokens. Delegation is read-only by
+default. `mode=workspace-write` requires `--allow-unsafe-exec`.
 
 ## Auth Surfaces
 
@@ -191,8 +199,8 @@ what is configured on the machine:
 | --- | --- |
 | OpenRouter | Used for model requests through `OPENROUTER_API_KEY`. |
 | OpenAI API | Detected through `OPENAI_API_KEY` for future provider work. |
-| Codex CLI OAuth | Detects `CODEX_HOME/auth.json` or `~/.codex/auth.json` presence only. |
-| GitHub/Copilot | Detects `GH_TOKEN` or `GITHUB_TOKEN` presence only. |
+| Codex CLI OAuth | Detected by `auth_status`; usable through `delegate_codex` when the official `codex` CLI is installed and logged in. |
+| GitHub/Copilot | Detected by `auth_status`; usable through `delegate_copilot` when the official `copilot` CLI is installed and logged in. |
 
 `syscall-agent` does not print, scrape, or repurpose ChatGPT/Codex OAuth or
 GitHub Copilot subscription tokens. That keeps provider integration on the

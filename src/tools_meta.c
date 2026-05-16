@@ -4,7 +4,10 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,11 +15,15 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAX_GREP_RESULTS 200
 #define MAX_GREP_LINE_BYTES 4096
 #define MAX_SKILL_BYTES  (64 * 1024)
+#define DELEGATE_OUTPUT_MAX (256 * 1024)
+#define DELEGATE_TIMEOUT_MAX_MS 300000
 
 static char *dup_or_default(cJSON *node, const char *def) {
     if (cJSON_IsString(node) && node->valuestring) return strdup(node->valuestring);
@@ -31,6 +38,140 @@ static cJSON *make_function_tool(const char *name, const char *desc, cJSON *para
     cJSON_AddStringToObject(fn, "description", desc);
     cJSON_AddItemToObject(fn, "parameters", params);
     return tool;
+}
+
+static long now_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
+
+static void set_nonblock(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+static void append_readable(int fd, Buf *out, int *eof, int *truncated) {
+    if (*eof) return;
+    char tmp[4096];
+    ssize_t n = read(fd, tmp, sizeof tmp);
+    if (n == 0) {
+        *eof = 1;
+        return;
+    }
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+        *eof = 1;
+        return;
+    }
+    size_t room = out->len < DELEGATE_OUTPUT_MAX ? DELEGATE_OUTPUT_MAX - out->len : 0;
+    size_t take = (size_t)n < room ? (size_t)n : room;
+    if (take > 0) buf_append(out, tmp, take);
+    if ((size_t)n > take) *truncated = 1;
+}
+
+static char *run_delegate(char *const argv[], const char *cwd, int timeout_ms) {
+    if (timeout_ms <= 0) timeout_ms = 120000;
+    if (timeout_ms > DELEGATE_TIMEOUT_MAX_MS) timeout_ms = DELEGATE_TIMEOUT_MAX_MS;
+
+    int out_pipe[2] = {-1, -1};
+    int err_pipe[2] = {-1, -1};
+    if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
+        if (out_pipe[0] >= 0) close(out_pipe[0]);
+        if (out_pipe[1] >= 0) close(out_pipe[1]);
+        if (err_pipe[0] >= 0) close(err_pipe[0]);
+        if (err_pipe[1] >= 0) close(err_pipe[1]);
+        return strdup("ERROR: pipe failed");
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        return strdup("ERROR: fork failed");
+    }
+    if (pid == 0) {
+        dup2(out_pipe[1], STDOUT_FILENO);
+        dup2(err_pipe[1], STDERR_FILENO);
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        if (cwd && *cwd && chdir(cwd) != 0) {
+            fprintf(stderr, "chdir(%s): %s\n", cwd, strerror(errno));
+            _exit(126);
+        }
+        execvp(argv[0], argv);
+        fprintf(stderr, "execvp(%s): %s\n", argv[0], strerror(errno));
+        _exit(127);
+    }
+
+    close(out_pipe[1]);
+    close(err_pipe[1]);
+    set_nonblock(out_pipe[0]);
+    set_nonblock(err_pipe[0]);
+
+    Buf so, se;
+    buf_init(&so);
+    buf_init(&se);
+    int out_eof = 0, err_eof = 0, out_trunc = 0, err_trunc = 0;
+    int status = 0, timed_out = 0;
+    long start = now_ms();
+    for (;;) {
+        struct pollfd pfds[2] = {
+            { .fd = out_eof ? -1 : out_pipe[0], .events = POLLIN },
+            { .fd = err_eof ? -1 : err_pipe[0], .events = POLLIN },
+        };
+        int remaining = timeout_ms - (int)(now_ms() - start);
+        if (remaining <= 0) {
+            timed_out = 1;
+            break;
+        }
+        int pn = poll(pfds, 2, remaining < 250 ? remaining : 250);
+        if (pn > 0) {
+            if (pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) append_readable(out_pipe[0], &so, &out_eof, &out_trunc);
+            if (pfds[1].revents & (POLLIN | POLLHUP | POLLERR)) append_readable(err_pipe[0], &se, &err_eof, &err_trunc);
+        }
+        int wn = waitpid(pid, &status, WNOHANG);
+        if (wn == pid) {
+            append_readable(out_pipe[0], &so, &out_eof, &out_trunc);
+            append_readable(err_pipe[0], &se, &err_eof, &err_trunc);
+            break;
+        }
+        if (out_eof && err_eof) {
+            waitpid(pid, &status, 0);
+            break;
+        }
+    }
+    if (timed_out) {
+        kill(pid, SIGTERM);
+        usleep(200 * 1000);
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+    }
+    close(out_pipe[0]);
+    close(err_pipe[0]);
+
+    int exit_code = -1;
+    if (WIFEXITED(status)) exit_code = WEXITSTATUS(status);
+
+    Buf out;
+    buf_init(&out);
+    buf_printf(&out,
+        "DELEGATE argv[0]=%s exit=%d timed_out=%s duration_ms=%ld\n"
+        "--- stdout (%zu bytes%s) ---\n",
+        argv[0],
+        exit_code,
+        timed_out ? "true" : "false",
+        now_ms() - start,
+        so.len,
+        out_trunc ? ", truncated" : "");
+    if (so.data) buf_append(&out, so.data, so.len);
+    buf_printf(&out, "\n--- stderr (%zu bytes%s) ---\n",
+        se.len,
+        err_trunc ? ", truncated" : "");
+    if (se.data) buf_append(&out, se.data, se.len);
+    buf_free(&so);
+    buf_free(&se);
+    return out.data;
 }
 
 static cJSON *param_obj(const char *const *required) {
@@ -425,7 +566,118 @@ static char *tool_read_skill(cJSON *args) {
     return out.data;
 }
 
-void tools_meta_register(cJSON *arr) {
+static char *tool_delegate_codex(ToolCtx *ctx, cJSON *args) {
+    if (!ctx || !ctx->allow_exec) {
+        return strdup("ERROR: delegate_codex requires --allow-exec");
+    }
+    char *prompt = dup_or_default(cJSON_GetObjectItem(args, "prompt"), NULL);
+    char *cwd = dup_or_default(cJSON_GetObjectItem(args, "cwd"), NULL);
+    char *model = dup_or_default(cJSON_GetObjectItem(args, "model"), NULL);
+    char *mode = dup_or_default(cJSON_GetObjectItem(args, "mode"), "readonly");
+    cJSON *timeout_j = cJSON_GetObjectItem(args, "timeout_ms");
+    int timeout_ms = cJSON_IsNumber(timeout_j) ? (int)timeout_j->valueint : 120000;
+    if (!prompt) {
+        free(cwd); free(model); free(mode);
+        return strdup("ERROR: missing required arg 'prompt'");
+    }
+    int write_mode = mode && strcmp(mode, "workspace-write") == 0;
+    if (write_mode && !ctx->allow_unsafe_exec) {
+        free(prompt); free(cwd); free(model); free(mode);
+        return strdup("ERROR: mode='workspace-write' requires --allow-unsafe-exec");
+    }
+    if (!write_mode && mode && strcmp(mode, "readonly") != 0) {
+        free(prompt); free(cwd); free(model); free(mode);
+        return strdup("ERROR: mode must be 'readonly' or 'workspace-write'");
+    }
+
+    char *argv[16];
+    int i = 0;
+    argv[i++] = "codex";
+    argv[i++] = "exec";
+    argv[i++] = "--sandbox";
+    argv[i++] = write_mode ? "workspace-write" : "read-only";
+    argv[i++] = "--ask-for-approval";
+    argv[i++] = "never";
+    if (cwd && *cwd) {
+        argv[i++] = "-C";
+        argv[i++] = cwd;
+    }
+    if (model && *model) {
+        argv[i++] = "-m";
+        argv[i++] = model;
+    }
+    argv[i++] = prompt;
+    argv[i] = NULL;
+
+    char *result = run_delegate(argv, cwd, timeout_ms);
+    free(prompt); free(cwd); free(model); free(mode);
+    return result;
+}
+
+static char *tool_delegate_copilot(ToolCtx *ctx, cJSON *args) {
+    if (!ctx || !ctx->allow_exec) {
+        return strdup("ERROR: delegate_copilot requires --allow-exec");
+    }
+    char *prompt = dup_or_default(cJSON_GetObjectItem(args, "prompt"), NULL);
+    char *cwd = dup_or_default(cJSON_GetObjectItem(args, "cwd"), NULL);
+    char *model = dup_or_default(cJSON_GetObjectItem(args, "model"), NULL);
+    char *mode = dup_or_default(cJSON_GetObjectItem(args, "mode"), "readonly");
+    cJSON *timeout_j = cJSON_GetObjectItem(args, "timeout_ms");
+    int timeout_ms = cJSON_IsNumber(timeout_j) ? (int)timeout_j->valueint : 120000;
+    if (!prompt) {
+        free(cwd); free(model); free(mode);
+        return strdup("ERROR: missing required arg 'prompt'");
+    }
+    int write_mode = mode && strcmp(mode, "workspace-write") == 0;
+    if (write_mode && !ctx->allow_unsafe_exec) {
+        free(prompt); free(cwd); free(model); free(mode);
+        return strdup("ERROR: mode='workspace-write' requires --allow-unsafe-exec");
+    }
+    if (!write_mode && mode && strcmp(mode, "readonly") != 0) {
+        free(prompt); free(cwd); free(model); free(mode);
+        return strdup("ERROR: mode must be 'readonly' or 'workspace-write'");
+    }
+
+    char *argv[24];
+    int i = 0;
+    argv[i++] = "copilot";
+    argv[i++] = "--no-color";
+    argv[i++] = "--stream";
+    argv[i++] = "off";
+    argv[i++] = "-s";
+    if (cwd && *cwd) {
+        argv[i++] = "-C";
+        argv[i++] = cwd;
+    }
+    if (model && *model) {
+        argv[i++] = "--model";
+        argv[i++] = model;
+    }
+    if (write_mode) {
+        argv[i++] = "--allow-all-tools";
+        argv[i++] = "--allow-all-paths";
+    } else {
+        argv[i++] = "--available-tools=read,grep,glob,ls";
+        argv[i++] = "--allow-tool=read,grep,glob,ls";
+    }
+    argv[i++] = "-p";
+    argv[i++] = prompt;
+    argv[i] = NULL;
+
+    char *result = run_delegate(argv, cwd, timeout_ms);
+    free(prompt); free(cwd); free(model); free(mode);
+    return result;
+}
+
+static void add_delegate_params(cJSON *p) {
+    add_prop(p, "prompt", "string", "Task or question to send to the official external CLI.");
+    add_prop(p, "cwd", "string", "Working directory for the delegated CLI. Defaults to current directory.");
+    add_prop(p, "model", "string", "Optional model id passed through to the delegated CLI.");
+    add_prop(p, "mode", "string", "'readonly' (default) or 'workspace-write'. workspace-write requires --allow-unsafe-exec.");
+    add_prop(p, "timeout_ms", "integer", "Kill delegated CLI after N ms. Default 120000, cap 300000.");
+}
+
+void tools_meta_register(cJSON *arr, int allow_delegates) {
     {
         cJSON *p = param_obj(NULL);
         cJSON_AddItemToArray(arr, make_function_tool(
@@ -502,6 +754,24 @@ void tools_meta_register(cJSON *arr) {
             "Read a local skill pack's SKILL.md by safe skill name.",
             p));
     }
+    if (allow_delegates) {
+        const char *req[] = {"prompt", NULL};
+        cJSON *p = param_obj(req);
+        add_delegate_params(p);
+        cJSON_AddItemToArray(arr, make_function_tool(
+            "delegate_codex",
+            "Delegate a task to the official Codex CLI, using its own supported auth. Readonly by default; workspace-write requires --allow-unsafe-exec.",
+            p));
+    }
+    if (allow_delegates) {
+        const char *req[] = {"prompt", NULL};
+        cJSON *p = param_obj(req);
+        add_delegate_params(p);
+        cJSON_AddItemToArray(arr, make_function_tool(
+            "delegate_copilot",
+            "Delegate a task to the official GitHub Copilot CLI, using its own supported auth. Readonly by default; workspace-write requires --allow-unsafe-exec.",
+            p));
+    }
 }
 
 char *tools_meta_dispatch(ToolCtx *ctx, const char *name, cJSON *args) {
@@ -516,5 +786,7 @@ char *tools_meta_dispatch(ToolCtx *ctx, const char *name, cJSON *args) {
     if (strcmp(name, "grep_text") == 0)    return tool_grep_text(args);
     if (strcmp(name, "list_skills") == 0)  return tool_list_skills(args);
     if (strcmp(name, "read_skill") == 0)   return tool_read_skill(args);
+    if (strcmp(name, "delegate_codex") == 0) return tool_delegate_codex(ctx, args);
+    if (strcmp(name, "delegate_copilot") == 0) return tool_delegate_copilot(ctx, args);
     return NULL;
 }

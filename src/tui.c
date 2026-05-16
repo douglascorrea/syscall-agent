@@ -574,7 +574,8 @@ static char *tools_text(const TuiApp *app) {
     if (app->cfg->allow_exec) {
         buf_append_cstr(&b,
             "\nExec tools enabled:\n"
-            "  exec_command, spawn_bg, bg_read, bg_kill, bg_list\n");
+            "  exec_command, spawn_bg, bg_read, bg_kill, bg_list,\n"
+            "  delegate_codex, delegate_copilot\n");
     } else {
         buf_append_cstr(&b,
             "\nExec tools disabled. Start with --allow-exec to expose exec_command,\n"
