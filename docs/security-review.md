@@ -7,10 +7,12 @@ Date: 2026-05-16
 The installed `security-best-practices` skill does not include a C-specific
 reference set, so this review applies general C and local-agent security
 guidance. No critical issues remain open in the current tree. The highest-risk
-surfaces are subprocess execution, local file reads/writes, URL fetching, and
-credential visibility. The current implementation keeps subprocess tools gated,
-keeps Linux sandboxing fail-closed, rejects non-HTTP(S) fetches, masks special
-mode bits on writes, and redacts secret-like environment variables.
+surfaces are subprocess execution, Termux device integrations, local file
+reads/writes, URL fetching, and credential visibility. The current
+implementation keeps arbitrary subprocess tools gated, keeps Linux sandboxing
+fail-closed, rejects non-HTTP(S) fetches, masks special mode bits on writes,
+redacts secret-like environment variables, and runs Termux integrations through
+fixed argv-only commands.
 
 ## Critical
 
@@ -90,6 +92,31 @@ Evidence:
   `src/http.c:63`.
 - Atomic writes mask mode bits and check `fchmod`/`close` errors:
   `src/tools_fs.c:197`, `src/tools_fs.c:204`.
+
+### L-3: Termux device tools expose mobile device state
+
+Impact: Termux integrations can read device-adjacent state such as battery,
+Wi-Fi details, and clipboard text, and can cause bounded side effects such as
+notifications, vibration, and wake-lock changes.
+
+Status: Mitigated by narrow wrappers and documented operator expectations.
+
+Evidence:
+
+- Termux tools are fixed command wrappers dispatched by explicit tool name:
+  `src/tools_termux.c:379`, `src/tools_termux.c:391`,
+  `src/tools_termux.c:405`, `src/tools_termux.c:421`.
+- The wrapper uses `fork`/`execvp` directly and never invokes a shell:
+  `src/tools_termux.c:137`, `src/tools_termux.c:173`.
+- Output is capped and each command has a short timeout:
+  `src/tools_termux.c:19`, `src/tools_termux.c:139`,
+  `src/tools_termux.c:214`.
+- User-provided notification and clipboard arguments are length-limited:
+  `src/tools_termux.c:399`, `src/tools_termux.c:410`.
+- Clipboard text is sent through stdin instead of as a parsed command-line
+  option: `src/tools_termux.c:401`, `src/tools_termux.c:402`.
+- Termux install and source-signature caveats are documented:
+  `docs/termux-install.md:6`, `docs/termux-install.md:96`.
 
 ## Verification
 

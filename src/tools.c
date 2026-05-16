@@ -4,6 +4,7 @@
 #include "tools_watch.h"
 #include "tools_net.h"
 #include "tools_meta.h"
+#include "tools_termux.h"
 #include "util.h"
 #include "http.h"
 #include "memory.h"
@@ -527,6 +528,7 @@ cJSON *tools_describe(const ToolCtx *ctx) {
 
     tools_fs_register(arr);
     tools_meta_register(arr, ctx ? ctx->allow_exec : 0);
+    tools_termux_register(arr);
     tools_proc_register(arr, ctx ? ctx->allow_exec : 0);
     tools_watch_register(arr);
     tools_net_register(arr);
@@ -547,6 +549,7 @@ char *tools_dispatch(ToolCtx *ctx, const char *name, cJSON *args) {
     char *r;
     if ((r = tools_fs_dispatch(ctx, name, args)))    return r;
     if ((r = tools_meta_dispatch(ctx, name, args)))  return r;
+    if ((r = tools_termux_dispatch(ctx, name, args))) return r;
     if ((r = tools_proc_dispatch(ctx, name, args)))  return r;
     if ((r = tools_watch_dispatch(ctx, name, args))) return r;
     if ((r = tools_net_dispatch(ctx, name, args)))   return r;

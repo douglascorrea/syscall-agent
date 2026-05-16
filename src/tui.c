@@ -570,7 +570,11 @@ static char *tools_text(const TuiApp *app) {
         "  save_memory, stat, list_dir, write_file, read_file_range,\n"
         "  auth_status, system_info, disk_usage, env_get, which, file_digest,\n"
         "  grep_text, list_skills, read_skill, dns_lookup, tcp_check, watch_path,\n"
-        "  list_processes\n");
+        "  list_processes,\n"
+        "  termux_info, termux_api_status, termux_storage_status,\n"
+        "  termux_battery_status, termux_wifi_info, termux_clipboard_get,\n"
+        "  termux_clipboard_set, termux_notification, termux_vibrate,\n"
+        "  termux_wake_lock\n");
     if (app->cfg->allow_exec) {
         buf_append_cstr(&b,
             "\nExec tools enabled:\n"

@@ -17,18 +17,19 @@ plain CLI mode and a responsive Pi-style TUI.
 
 - Pure C implementation with one generated binary.
 - OpenRouter chat-completions backend.
-- Tool-calling loop with file, web, memory, process, watch, and network tools.
+- Tool-calling loop with file, web, memory, process, watch, network, and Termux tools.
 - Runtime tool catalog, auth status, host diagnostics, and local skill-pack tools.
 - Optional syscall-backed command execution with resource limits.
 - Atomic file writes via `mkstemp` + `rename`.
 - `mmap` range reads for large files and logs.
 - Persistent `MEMORY.md` with append locking.
 - Interactive `--tui` mode inspired by Pi Agent.
-- Focused regression tests for TUI commands, agent events, and security checks.
+- Android Termux install path and Termux:API device integrations.
+- Focused regression tests for TUI commands, agent events, tools, and security checks.
 
 ## Requirements
 
-- macOS or Linux
+- macOS, Linux, or Android through Termux
 - C compiler with C11 support
 - `make`
 - `libcurl`
@@ -39,6 +40,17 @@ On macOS, `libcurl` is usually already available. On Debian/Ubuntu:
 ```sh
 sudo apt-get install build-essential libcurl4-openssl-dev
 ```
+
+On Android, install Termux from F-Droid or GitHub, then inside Termux:
+
+```sh
+pkg update
+pkg upgrade
+pkg install git clang make libcurl
+```
+
+Full Android setup, storage, and Termux:API instructions are in
+[docs/termux-install.md](docs/termux-install.md).
 
 ## Build
 
@@ -166,6 +178,21 @@ Always available:
 | `tcp_check` | Non-blocking TCP reachability probe with duration. |
 | `watch_path` | Wait for file or directory changes. |
 | `list_processes` | List top processes by RSS. |
+| `termux_info` | Detect Termux/Android environment and command availability. |
+| `termux_api_status` | Check Termux:API helper command availability and setup hints. |
+| `termux_storage_status` | Check Android shared-storage symlinks from `termux-setup-storage`. |
+| `termux_battery_status` | Read Android battery state through Termux:API. |
+| `termux_wifi_info` | Read current Wi-Fi connection details through Termux:API. |
+| `termux_clipboard_get` | Read Android clipboard text through Termux:API. |
+| `termux_clipboard_set` | Set Android clipboard text through Termux:API. |
+| `termux_notification` | Show an Android notification through Termux:API. |
+| `termux_vibrate` | Vibrate the Android device for a bounded duration. |
+| `termux_wake_lock` | Acquire or release Termux's wake lock. |
+
+Termux tools degrade gracefully outside Termux or when the relevant `termux-*`
+command is missing. They invoke fixed Termux commands through argv-only
+`execvp`, never through a shell. See
+[docs/termux-install.md](docs/termux-install.md) for Android setup.
 
 Gated by `--allow-exec`:
 
@@ -266,6 +293,7 @@ src/
   tui.c                  raw terminal UI
   tools.c                shared tool registration and dispatch
   tools_meta.c           tool catalog, auth, host diagnostics, skills, grep/checksum
+  tools_termux.c         Android Termux detection and Termux:API wrappers
   tools_fs.c             stat, list_dir, write_file, read_file_range
   tools_proc.c           exec, background process, process listing
   tools_watch.c          kqueue/inotify path watching
