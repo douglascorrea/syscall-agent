@@ -39,6 +39,9 @@ Evidence:
   `src/tools_meta.c:121`.
 - `env_get` redacts variables whose names contain sensitive markers:
   `src/tools_meta.c:56`.
+- Codex/Copilot subscription usage is implemented through official local CLI
+  delegation rather than token scraping. Delegation requires `--allow-exec`;
+  write-capable delegation requires `--allow-unsafe-exec`.
 
 ### M-2: Unbounded tool output from text search
 

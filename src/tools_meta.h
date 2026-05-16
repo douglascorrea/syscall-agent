@@ -3,7 +3,7 @@
 
 #include "tools.h"
 
-void tools_meta_register(cJSON *arr);
+void tools_meta_register(cJSON *arr, int allow_delegates);
 char *tools_meta_dispatch(ToolCtx *ctx, const char *name, cJSON *args);
 
 #endif

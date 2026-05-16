@@ -37,7 +37,25 @@ static void test_list_tools_includes_meta_tools(void) {
     expect_contains("list_tools", result, "auth_status");
     expect_contains("list_tools", result, "system_info");
     expect_contains("list_tools", result, "list_skills");
+    if (strstr(result, "delegate_codex")) {
+        fprintf(stderr, "delegate tools should not be listed without allow_exec\n");
+        exit(1);
+    }
     free(result);
+}
+
+static void test_delegate_tools_are_gated(void) {
+    ToolCtx ctx = { .allow_exec = 1, .allow_unsafe_exec = 0 };
+    char *result = tools_dispatch(&ctx, "list_tools", NULL);
+    expect_contains("delegate codex listed", result, "delegate_codex");
+    expect_contains("delegate copilot listed", result, "delegate_copilot");
+    free(result);
+
+    cJSON *args = cJSON_Parse("{\"prompt\":\"hi\",\"mode\":\"workspace-write\"}");
+    result = tools_dispatch(&ctx, "delegate_codex", args);
+    expect_contains("delegate codex unsafe gate", result, "requires --allow-unsafe-exec");
+    free(result);
+    cJSON_Delete(args);
 }
 
 static void test_env_get_redacts_secret_values(void) {
@@ -63,6 +81,7 @@ static void test_file_digest_reports_algorithm(void) {
 
 int main(void) {
     test_list_tools_includes_meta_tools();
+    test_delegate_tools_are_gated();
     test_env_get_redacts_secret_values();
     test_file_digest_reports_algorithm();
     return 0;

@@ -14,7 +14,8 @@ No blocking correctness, security, or regression findings remain open.
 - Tool visibility now has a runtime path through `list_tools`, and the tool is
   covered by `tools_meta_test`.
 - Auth visibility avoids printing raw secret values and keeps Codex/Copilot
-  subscription credentials out of the model-call path.
+  subscription credentials out of the model-call path. Subscription usage goes
+  through official CLI delegation tools instead.
 - New TUI commands are parse-tested, and the rendered command bodies are local
   status surfaces rather than network calls.
 - `grep_text` output is capped by result count and per-line bytes to avoid
