@@ -2,8 +2,8 @@
 
 Date: 2026-05-16
 
-Scope: current `master` tree after adding Android Termux installation docs and
-Termux-focused tools.
+Scope: current `master` tree after adding the live OpenRouter model picker and
+model catalog helpers.
 
 ## Findings
 
@@ -18,6 +18,12 @@ No blocking correctness, security, or regression findings remain open.
   through official CLI delegation tools instead.
 - New TUI commands are parse-tested, and the rendered command bodies are local
   status surfaces rather than network calls.
+- `/model` and `/models` now open a live OpenRouter model picker backed by
+  `GET https://openrouter.ai/api/v1/models`, with search, navigation, refresh,
+  and Enter-to-select behavior.
+- The model catalog parser is isolated in `openrouter_models.c` and covered by
+  `openrouter_models_test`, including response parsing and case-insensitive
+  filtering.
 - `grep_text` output is capped by result count and per-line bytes to avoid
   pathological large-line output.
 - The README and system prompt have both been updated so the model-facing and
@@ -44,6 +50,9 @@ No blocking correctness, security, or regression findings remain open.
   details. This is intentional for the Termux feature set, but users should run
   the agent only in trusted sessions and avoid exposing private clipboard
   content to untrusted prompts.
+- The model picker performs a synchronous catalog fetch in the TUI thread. That
+  keeps the implementation simple, but the UI can pause briefly while
+  OpenRouter responds.
 
 ## Verification
 

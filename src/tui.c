@@ -1,10 +1,12 @@
 #include "tui.h"
+#include "openrouter_models.h"
 #include "util.h"
 
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,7 +68,29 @@ typedef struct {
     char status[256];
     struct termios old_termios;
     int raw_enabled;
+    OpenRouterModelCatalog model_catalog;
+    int model_catalog_loaded;
+    int model_picker_open;
+    char model_query[256];
+    size_t model_query_len;
+    size_t *model_matches;
+    size_t model_match_len;
+    size_t model_match_cap;
+    size_t model_selected;
+    size_t model_scroll;
+    char *owned_model_id;
 } TuiApp;
+
+typedef enum {
+    TUI_KEY_NONE,
+    TUI_KEY_ESC,
+    TUI_KEY_UP,
+    TUI_KEY_DOWN,
+    TUI_KEY_PAGE_UP,
+    TUI_KEY_PAGE_DOWN,
+    TUI_KEY_HOME,
+    TUI_KEY_END
+} TuiKey;
 
 static volatile sig_atomic_t g_resize_pending = 0;
 
@@ -193,8 +217,14 @@ int tui_parse_command(const char *line, TuiCommand *out) {
                 return 1;
             }
         }
+        if (strchr(arg, '/')) {
+            out->type = TUI_CMD_MODEL;
+            out->model_index = -1;
+            out->model_id = arg;
+            return 1;
+        }
         out->type = TUI_CMD_UNKNOWN;
-        out->error = "unknown model; use /model to list choices";
+        out->error = "unknown model; use /model to open the OpenRouter picker";
         return 1;
     }
     if (cmd_len == 7 && strncmp(cmd, "verbose", 7) == 0) {
@@ -406,6 +436,146 @@ static void free_entries(TuiApp *app) {
     app->cap = 0;
 }
 
+static int model_match_append(TuiApp *app, size_t index) {
+    if (app->model_match_len >= app->model_match_cap) {
+        size_t nc = app->model_match_cap ? app->model_match_cap * 2 : 128;
+        size_t *items = realloc(app->model_matches, nc * sizeof(size_t));
+        if (!items) return -1;
+        app->model_matches = items;
+        app->model_match_cap = nc;
+    }
+    app->model_matches[app->model_match_len++] = index;
+    return 0;
+}
+
+static void model_picker_rebuild_matches(TuiApp *app) {
+    app->model_match_len = 0;
+    for (size_t i = 0; i < app->model_catalog.len; i++) {
+        if (openrouter_model_matches(&app->model_catalog.items[i], app->model_query)) {
+            if (model_match_append(app, i) != 0) break;
+        }
+    }
+    if (app->model_match_len == 0) {
+        app->model_selected = 0;
+        app->model_scroll = 0;
+        return;
+    }
+    if (app->model_selected >= app->model_match_len) {
+        app->model_selected = app->model_match_len - 1;
+    }
+    if (app->model_scroll >= app->model_match_len) app->model_scroll = 0;
+}
+
+static void model_picker_select_current_model(TuiApp *app) {
+    const char *current = app->cfg->model;
+    if (!current || !*current) return;
+    for (size_t i = 0; i < app->model_match_len; i++) {
+        size_t model_index = app->model_matches[i];
+        if (strcmp(app->model_catalog.items[model_index].id, current) == 0) {
+            app->model_selected = i;
+            return;
+        }
+    }
+}
+
+static void model_picker_ensure_visible(TuiApp *app, int visible_rows) {
+    if (visible_rows < 1) visible_rows = 1;
+    if (app->model_match_len == 0) {
+        app->model_scroll = 0;
+        return;
+    }
+    if (app->model_selected >= app->model_match_len) {
+        app->model_selected = app->model_match_len - 1;
+    }
+    if (app->model_selected < app->model_scroll) {
+        app->model_scroll = app->model_selected;
+    }
+    size_t visible = (size_t)visible_rows;
+    if (app->model_selected >= app->model_scroll + visible) {
+        app->model_scroll = app->model_selected - visible + 1;
+    }
+}
+
+static void set_current_model(TuiApp *app, const char *model_id) {
+    if (!model_id || !*model_id) return;
+    char *copy = strdup(model_id);
+    if (!copy) {
+        add_entry(app, ENTRY_ERROR, "model", "out of memory while setting model");
+        return;
+    }
+    free(app->owned_model_id);
+    app->owned_model_id = copy;
+    app->cfg->model = app->owned_model_id;
+
+    char msg[512];
+    snprintf(msg, sizeof msg, "model set to %s", app->cfg->model);
+    add_entry(app, ENTRY_SYSTEM, "model", msg);
+    snprintf(app->status, sizeof app->status, "%s", msg);
+}
+
+static int load_openrouter_models(TuiApp *app, int force) {
+    if (app->model_catalog_loaded && !force) return 0;
+    snprintf(app->status, sizeof app->status, "loading OpenRouter models...");
+
+    char err[256];
+    if (openrouter_models_fetch(app->cfg->api_key, &app->model_catalog, err, sizeof err) != 0) {
+        char msg[512];
+        snprintf(msg, sizeof msg, "%s", err[0] ? err : "could not load OpenRouter models");
+        add_entry(app, ENTRY_ERROR, "models", msg);
+        snprintf(app->status, sizeof app->status, "model catalog load failed");
+        return -1;
+    }
+    app->model_catalog_loaded = 1;
+    app->model_query[0] = '\0';
+    app->model_query_len = 0;
+    app->model_selected = 0;
+    app->model_scroll = 0;
+    model_picker_rebuild_matches(app);
+    model_picker_select_current_model(app);
+    snprintf(app->status, sizeof app->status, "loaded %zu OpenRouter models", app->model_catalog.len);
+    return 0;
+}
+
+static void open_model_picker(TuiApp *app) {
+    if (load_openrouter_models(app, 0) != 0) return;
+    app->model_picker_open = 1;
+    app->model_query[0] = '\0';
+    app->model_query_len = 0;
+    app->model_selected = 0;
+    app->model_scroll = 0;
+    model_picker_rebuild_matches(app);
+    model_picker_select_current_model(app);
+    snprintf(app->status, sizeof app->status, "model picker open");
+}
+
+static void close_model_picker(TuiApp *app, const char *status) {
+    app->model_picker_open = 0;
+    app->model_query[0] = '\0';
+    app->model_query_len = 0;
+    app->model_selected = 0;
+    app->model_scroll = 0;
+    snprintf(app->status, sizeof app->status, "%s", status ? status : "ready");
+}
+
+static void model_picker_move(TuiApp *app, long delta) {
+    if (app->model_match_len == 0) return;
+    long next = (long)app->model_selected + delta;
+    if (next < 0) next = 0;
+    if (next >= (long)app->model_match_len) next = (long)app->model_match_len - 1;
+    app->model_selected = (size_t)next;
+}
+
+static void model_picker_select(TuiApp *app) {
+    if (app->model_match_len == 0) {
+        snprintf(app->status, sizeof app->status, "no matching model");
+        return;
+    }
+    size_t model_index = app->model_matches[app->model_selected];
+    const char *id = app->model_catalog.items[model_index].id;
+    set_current_model(app, id);
+    app->model_picker_open = 0;
+}
+
 static void add_wrapped(RenderLines *rl, EntryKind kind, const char *prefix,
                         const char *text, int width) {
     int content_width = width > 4 ? width - 4 : 1;
@@ -440,6 +610,79 @@ static void build_render_lines(TuiApp *app, RenderLines *rl) {
             add_wrapped(rl, e->kind, "  ", e->text, app->width);
         }
         render_lines_add(rl, ENTRY_SYSTEM, "");
+    }
+}
+
+static void render_model_picker(TuiApp *app, int body_height) {
+    int printed = 0;
+    int list_rows = body_height - 4;
+    if (list_rows < 1) list_rows = 1;
+    model_picker_ensure_visible(app, list_rows);
+
+    char line[2048];
+    snprintf(line, sizeof line, " OpenRouter model picker  models:%zu  matches:%zu",
+        app->model_catalog.len, app->model_match_len);
+    print_padded(line, app->width, ENTRY_SYSTEM);
+    printf("\r\n");
+    printed++;
+
+    snprintf(line, sizeof line, " search: %s", app->model_query);
+    print_padded(line, app->width, ENTRY_ASSISTANT);
+    printf("\r\n");
+    printed++;
+
+    if (app->model_match_len == 0) {
+        print_padded(" no matching models", app->width, ENTRY_ERROR);
+        printf("\r\n");
+        printed++;
+        for (int i = 1; i < list_rows; i++) {
+            print_padded("", app->width, ENTRY_ASSISTANT);
+            printf("\r\n");
+            printed++;
+        }
+    } else {
+        for (int row = 0; row < list_rows; row++) {
+            size_t match_pos = app->model_scroll + (size_t)row;
+            if (match_pos < app->model_match_len) {
+                size_t model_index = app->model_matches[match_pos];
+                OpenRouterModel *m = &app->model_catalog.items[model_index];
+                const char *mark = match_pos == app->model_selected ? ">" : " ";
+                if (m->context_length > 0) {
+                    snprintf(line, sizeof line, "%s %-42s %-28s ctx:%d in:%s out:%s",
+                        mark,
+                        m->id ? m->id : "",
+                        m->name ? m->name : "",
+                        m->context_length,
+                        m->prompt_price && *m->prompt_price ? m->prompt_price : "0",
+                        m->completion_price && *m->completion_price ? m->completion_price : "0");
+                } else {
+                    snprintf(line, sizeof line, "%s %-42s %-28s in:%s out:%s",
+                        mark,
+                        m->id ? m->id : "",
+                        m->name ? m->name : "",
+                        m->prompt_price && *m->prompt_price ? m->prompt_price : "0",
+                        m->completion_price && *m->completion_price ? m->completion_price : "0");
+                }
+                print_padded(line, app->width,
+                    match_pos == app->model_selected ? ENTRY_USER : ENTRY_ASSISTANT);
+            } else {
+                print_padded("", app->width, ENTRY_ASSISTANT);
+            }
+            printf("\r\n");
+            printed++;
+        }
+    }
+
+    snprintf(line, sizeof line,
+        " Up/Down move  PgUp/PgDn jump  type to search  Enter select  Esc close  Ctrl-R refresh");
+    print_padded(line, app->width, ENTRY_SYSTEM);
+    printf("\r\n");
+    printed++;
+
+    while (printed < body_height) {
+        print_padded("", app->width, ENTRY_ASSISTANT);
+        printf("\r\n");
+        printed++;
     }
 }
 
@@ -479,20 +722,24 @@ static void render_app(TuiApp *app) {
     int body_height = app->height - 2 - footer_lines;
     if (body_height < 1) body_height = 1;
 
-    RenderLines rl = {0};
-    build_render_lines(app, &rl);
-    size_t start = rl.len > (size_t)body_height ? rl.len - (size_t)body_height : 0;
-    int printed = 0;
-    for (size_t i = start; i < rl.len && printed < body_height; i++, printed++) {
-        print_padded(rl.items[i].text, app->width, rl.items[i].kind);
-        printf("\r\n");
+    if (app->model_picker_open) {
+        render_model_picker(app, body_height);
+    } else {
+        RenderLines rl = {0};
+        build_render_lines(app, &rl);
+        size_t start = rl.len > (size_t)body_height ? rl.len - (size_t)body_height : 0;
+        int printed = 0;
+        for (size_t i = start; i < rl.len && printed < body_height; i++, printed++) {
+            print_padded(rl.items[i].text, app->width, rl.items[i].kind);
+            printf("\r\n");
+        }
+        while (printed < body_height) {
+            print_padded("", app->width, ENTRY_ASSISTANT);
+            printf("\r\n");
+            printed++;
+        }
+        render_lines_free(&rl);
     }
-    while (printed < body_height) {
-        print_padded("", app->width, ENTRY_ASSISTANT);
-        printf("\r\n");
-        printed++;
-    }
-    render_lines_free(&rl);
 
     printf("\x1b[38;2;95;135;255m");
     print_repeated("─", app->width);
@@ -508,7 +755,11 @@ static void render_app(TuiApp *app) {
     printf("\r\n");
 
     char input_line[9000];
-    snprintf(input_line, sizeof input_line, "› %s", app->input);
+    if (app->model_picker_open) {
+        snprintf(input_line, sizeof input_line, "model search> %s", app->model_query);
+    } else {
+        snprintf(input_line, sizeof input_line, "› %s", app->input);
+    }
     print_padded(input_line, app->width, ENTRY_ASSISTANT);
     fflush(stdout);
 }
@@ -550,15 +801,6 @@ static void disable_raw(TuiApp *app) {
 static void add_welcome(TuiApp *app) {
     add_entry(app, ENTRY_SYSTEM, "pi-style tui",
         "Type a prompt and press Enter. Commands: /model, /verbose normal|tools|reasoning|all, /new, /exit.");
-}
-
-static char *models_text(void) {
-    Buf b;
-    buf_init(&b);
-    for (size_t i = 0; i < TUI_MODEL_COUNT; i++) {
-        buf_printf(&b, "%zu. %s  %s\n", i + 1, TUI_MODELS[i].id, TUI_MODELS[i].label);
-    }
-    return b.data;
 }
 
 static char *tools_text(const TuiApp *app) {
@@ -688,7 +930,9 @@ static void handle_command(TuiApp *app, const char *line) {
         app->should_exit = 1;
     } else if (cmd.type == TUI_CMD_HELP) {
         add_entry(app, ENTRY_SYSTEM, "commands",
-            "/model lists predefined models; /model N or /model id selects one.\n"
+            "/model opens the live OpenRouter model picker.\n"
+            "/models opens the same picker. Type to search, Enter selects, Esc closes.\n"
+            "/model N selects a built-in quick choice; /model provider/model-id sets any OpenRouter id directly.\n"
             "/verbose normal hides tool and reasoning detail.\n"
             "/verbose tools shows tool calls and tool output.\n"
             "/verbose reasoning shows model reasoning fields when returned.\n"
@@ -699,9 +943,7 @@ static void handle_command(TuiApp *app, const char *line) {
             "/sysinfo shows host and working-directory information.\n"
             "/new clears the visible transcript. /exit leaves the TUI.");
     } else if (cmd.type == TUI_CMD_MODELS) {
-        char *m = models_text();
-        add_entry(app, ENTRY_SYSTEM, "models", m ? m : "");
-        free(m);
+        open_model_picker(app);
     } else if (cmd.type == TUI_CMD_TOOLS) {
         char *t = tools_text(app);
         add_entry(app, ENTRY_SYSTEM, "tools", t ? t : "");
@@ -719,11 +961,7 @@ static void handle_command(TuiApp *app, const char *line) {
         add_entry(app, ENTRY_SYSTEM, "system", s ? s : "");
         free(s);
     } else if (cmd.type == TUI_CMD_MODEL) {
-        app->cfg->model = cmd.model_id;
-        char msg[512];
-        snprintf(msg, sizeof msg, "model set to %s", app->cfg->model);
-        add_entry(app, ENTRY_SYSTEM, "model", msg);
-        snprintf(app->status, sizeof app->status, "%s", msg);
+        set_current_model(app, cmd.model_id);
     } else if (cmd.type == TUI_CMD_VERBOSE) {
         app->cfg->verbose = cmd.verbose_mode;
         char msg[128];
@@ -795,10 +1033,122 @@ static void submit_line(TuiApp *app) {
     free(line);
 }
 
+static int read_byte_timeout(unsigned char *out, int timeout_ms) {
+    struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+    int rc = poll(&pfd, 1, timeout_ms);
+    if (rc <= 0 || !(pfd.revents & POLLIN)) return 0;
+    return read(STDIN_FILENO, out, 1) == 1;
+}
+
+static TuiKey read_escape_key(void) {
+    unsigned char a = 0, b = 0, c = 0;
+    if (!read_byte_timeout(&a, 30)) return TUI_KEY_ESC;
+    if (a != '[') return TUI_KEY_ESC;
+    if (!read_byte_timeout(&b, 30)) return TUI_KEY_ESC;
+
+    if (b == 'A') return TUI_KEY_UP;
+    if (b == 'B') return TUI_KEY_DOWN;
+    if (b == 'H') return TUI_KEY_HOME;
+    if (b == 'F') return TUI_KEY_END;
+    if (b == '5' || b == '6') {
+        if (read_byte_timeout(&c, 30) && c == '~') {
+            return b == '5' ? TUI_KEY_PAGE_UP : TUI_KEY_PAGE_DOWN;
+        }
+    }
+    return TUI_KEY_NONE;
+}
+
+static int picker_visible_rows(const TuiApp *app) {
+    int footer_lines = 3;
+    int body_height = app->height - 2 - footer_lines;
+    int rows = body_height - 4;
+    return rows > 1 ? rows : 1;
+}
+
+static void handle_model_picker_key(TuiApp *app, TuiKey key) {
+    int visible = picker_visible_rows(app);
+    switch (key) {
+        case TUI_KEY_ESC:
+            close_model_picker(app, "ready");
+            break;
+        case TUI_KEY_UP:
+            model_picker_move(app, -1);
+            break;
+        case TUI_KEY_DOWN:
+            model_picker_move(app, 1);
+            break;
+        case TUI_KEY_PAGE_UP:
+            model_picker_move(app, -visible);
+            break;
+        case TUI_KEY_PAGE_DOWN:
+            model_picker_move(app, visible);
+            break;
+        case TUI_KEY_HOME:
+            app->model_selected = 0;
+            break;
+        case TUI_KEY_END:
+            if (app->model_match_len > 0) app->model_selected = app->model_match_len - 1;
+            break;
+        default:
+            break;
+    }
+}
+
+static void handle_model_picker_byte(TuiApp *app, unsigned char ch) {
+    if (ch == 3) {
+        close_model_picker(app, "ready");
+        return;
+    }
+    if (ch == 4) {
+        app->should_exit = 1;
+        return;
+    }
+    if (ch == '\r' || ch == '\n') {
+        model_picker_select(app);
+        return;
+    }
+    if (ch == 18) {
+        if (load_openrouter_models(app, 1) == 0) {
+            app->model_picker_open = 1;
+            snprintf(app->status, sizeof app->status, "model catalog refreshed");
+        }
+        return;
+    }
+    if (ch == 27) {
+        handle_model_picker_key(app, read_escape_key());
+        return;
+    }
+    if (ch == 127 || ch == 8) {
+        if (app->model_query_len > 0) {
+            app->model_query[--app->model_query_len] = '\0';
+            app->model_selected = 0;
+            app->model_scroll = 0;
+            model_picker_rebuild_matches(app);
+        }
+        return;
+    }
+    if (ch == 21) {
+        app->model_query_len = 0;
+        app->model_query[0] = '\0';
+        app->model_selected = 0;
+        app->model_scroll = 0;
+        model_picker_rebuild_matches(app);
+        return;
+    }
+    if (isprint(ch) && app->model_query_len + 1 < sizeof app->model_query) {
+        app->model_query[app->model_query_len++] = (char)ch;
+        app->model_query[app->model_query_len] = '\0';
+        app->model_selected = 0;
+        app->model_scroll = 0;
+        model_picker_rebuild_matches(app);
+    }
+}
+
 int tui_run(AgentConfig *cfg) {
     TuiApp app;
     memset(&app, 0, sizeof app);
     app.cfg = cfg;
+    openrouter_model_catalog_init(&app.model_catalog);
     snprintf(app.status, sizeof app.status, "ready");
 
     if (enable_raw(&app) != 0) return 2;
@@ -816,14 +1166,16 @@ int tui_run(AgentConfig *cfg) {
         }
         if (n == 0) continue;
 
-        if (ch == 3 || ch == 4) {
+        if (app.model_picker_open) {
+            handle_model_picker_byte(&app, ch);
+        } else if (ch == 3 || ch == 4) {
             app.should_exit = 1;
         } else if (ch == '\r' || ch == '\n') {
             submit_line(&app);
         } else if (ch == 127 || ch == 8) {
             if (app.input_len > 0) app.input[--app.input_len] = '\0';
         } else if (ch == 27) {
-            /* Escape/arrow sequences are intentionally ignored in this small editor. */
+            (void)read_escape_key();
         } else if (isprint(ch) && app.input_len + 1 < sizeof app.input) {
             app.input[app.input_len++] = (char)ch;
             app.input[app.input_len] = '\0';
@@ -832,6 +1184,9 @@ int tui_run(AgentConfig *cfg) {
     }
 
     disable_raw(&app);
+    openrouter_model_catalog_free(&app.model_catalog);
+    free(app.model_matches);
+    free(app.owned_model_id);
     free_entries(&app);
     return 0;
 }

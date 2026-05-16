@@ -11,8 +11,9 @@ surfaces are subprocess execution, Termux device integrations, local file
 reads/writes, URL fetching, and credential visibility. The current
 implementation keeps arbitrary subprocess tools gated, keeps Linux sandboxing
 fail-closed, rejects non-HTTP(S) fetches, masks special mode bits on writes,
-redacts secret-like environment variables, and runs Termux integrations through
-fixed argv-only commands.
+redacts secret-like environment variables, runs Termux integrations through
+fixed argv-only commands, and uses the OpenRouter API key only as a bearer token
+for OpenRouter API calls.
 
 ## Critical
 
@@ -117,6 +118,22 @@ Evidence:
   option: `src/tools_termux.c:401`, `src/tools_termux.c:402`.
 - Termux install and source-signature caveats are documented:
   `docs/termux-install.md:6`, `docs/termux-install.md:96`.
+
+### L-4: Model catalog fetch uses the OpenRouter API key
+
+Impact: The TUI model picker fetches OpenRouter's model catalog and may include
+`OPENROUTER_API_KEY` as a bearer token when available.
+
+Status: Accepted. This is the same provider boundary already used for chat
+requests, and the key is not printed into the TUI transcript.
+
+Evidence:
+
+- Catalog fetch is limited to OpenRouter's documented models endpoint:
+  `src/openrouter_models.c:10`, `src/openrouter_models.c:140`.
+- The Authorization header is constructed only for the request and is not
+  persisted or displayed: `src/openrouter_models.c:129`,
+  `src/openrouter_models.c:133`.
 
 ## Verification
 

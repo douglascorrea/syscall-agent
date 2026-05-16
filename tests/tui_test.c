@@ -67,6 +67,12 @@ static void test_model_command_selects_predefined_models(void) {
         tui_parse_command("/model google/gemini-2.5-flash", &cmd), 1);
     expect_int("model by id index", cmd.model_index, 2);
     expect_str("model by id", cmd.model_id, "google/gemini-2.5-flash");
+
+    expect_int("model arbitrary openrouter id parse",
+        tui_parse_command("/model meta-llama/llama-4.1", &cmd), 1);
+    expect_int("model arbitrary type", cmd.type, TUI_CMD_MODEL);
+    expect_int("model arbitrary index", cmd.model_index, -1);
+    expect_str("model arbitrary id", cmd.model_id, "meta-llama/llama-4.1");
 }
 
 static void test_new_and_exit_commands(void) {

@@ -130,9 +130,10 @@ Slash commands:
 
 | Command | Behavior |
 | --- | --- |
-| `/model` | List predefined OpenRouter model choices. |
-| `/model N` | Select a model by list index. |
-| `/model provider/model-id` | Select a predefined model by id. |
+| `/model` | Open a live OpenRouter model picker backed by `GET /api/v1/models`. |
+| `/models` | Open the same model picker. |
+| `/model N` | Select a built-in quick choice by list index. |
+| `/model provider/model-id` | Set any OpenRouter model id directly. |
 | `/verbose normal` | Show only user and assistant conversation text. |
 | `/verbose tools` | Also show tool calls and tool results. |
 | `/verbose reasoning` | Also show model reasoning fields when returned. |
@@ -144,6 +145,17 @@ Slash commands:
 | `/sysinfo` | Show host OS, architecture, cwd, CPU count, and page size. |
 | `/new` | Clear the visible transcript. |
 | `/exit` | Leave the TUI. |
+
+Model picker controls:
+
+| Key | Behavior |
+| --- | --- |
+| Type text | Filter models by id, name, or description. |
+| Up/Down | Move through the filtered list. |
+| PageUp/PageDown | Jump through the filtered list. |
+| Enter | Select the highlighted model for the current session. |
+| Esc | Close the picker without changing the model. |
+| Ctrl-R | Refresh the OpenRouter model catalog. |
 
 Reasoning display supports OpenRouter-style `reasoning`, `reasoning_content`,
 and `reasoning_details` fields when the selected model returns them.
@@ -290,6 +302,7 @@ src/
   main.c                 CLI entry and flag parsing
   agent.c                tool-calling loop and event emission
   openrouter.c           OpenRouter request/response handling
+  openrouter_models.c    OpenRouter model catalog fetch/parse/filter helpers
   tui.c                  raw terminal UI
   tools.c                shared tool registration and dispatch
   tools_meta.c           tool catalog, auth, host diagnostics, skills, grep/checksum

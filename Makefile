@@ -19,6 +19,7 @@ SRC := \
   src/tui.c \
   src/agent.c \
   src/openrouter.c \
+  src/openrouter_models.c \
   src/tools.c \
   src/tools_meta.c \
   src/tools_termux.c \
@@ -53,16 +54,17 @@ clean:
 run: $(BIN)
 	./$(BIN) $(ARGS)
 
-test: $(BUILD)/tui_test $(BUILD)/agent_events_test $(BUILD)/security_test $(BUILD)/tools_meta_test $(BUILD)/tools_termux_test
+test: $(BUILD)/tui_test $(BUILD)/agent_events_test $(BUILD)/security_test $(BUILD)/tools_meta_test $(BUILD)/tools_termux_test $(BUILD)/openrouter_models_test
 	./$(BUILD)/tui_test
 	./$(BUILD)/agent_events_test
 	./$(BUILD)/security_test
 	./$(BUILD)/tools_meta_test
 	./$(BUILD)/tools_termux_test
+	./$(BUILD)/openrouter_models_test
 
-$(BUILD)/tui_test: tests/tui_test.c src/tui.c src/util.c
+$(BUILD)/tui_test: tests/tui_test.c src/tui.c src/openrouter_models.c src/http.c src/util.c vendor/cJSON.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INCS) tests/tui_test.c src/tui.c src/util.c -o $@
+	$(CC) $(CFLAGS) $(INCS) tests/tui_test.c src/tui.c src/openrouter_models.c src/http.c src/util.c vendor/cJSON.c $(LDLIBS) -o $@
 
 $(BUILD)/agent_events_test: tests/agent_events_test.c src/agent.c src/util.c vendor/cJSON.c
 	@mkdir -p $(dir $@)
@@ -79,3 +81,7 @@ $(BUILD)/tools_meta_test: tests/tools_meta_test.c src/tools.c src/tools_meta.c s
 $(BUILD)/tools_termux_test: tests/tools_termux_test.c src/tools.c src/tools_meta.c src/tools_termux.c src/tools_fs.c src/tools_proc.c src/tools_watch.c src/tools_net.c src/http.c src/memory.c src/util.c vendor/cJSON.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCS) tests/tools_termux_test.c src/tools.c src/tools_meta.c src/tools_termux.c src/tools_fs.c src/tools_proc.c src/tools_watch.c src/tools_net.c src/http.c src/memory.c src/util.c vendor/cJSON.c $(LDLIBS) -o $@
+
+$(BUILD)/openrouter_models_test: tests/openrouter_models_test.c src/openrouter_models.c src/http.c src/util.c vendor/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCS) tests/openrouter_models_test.c src/openrouter_models.c src/http.c src/util.c vendor/cJSON.c $(LDLIBS) -o $@
