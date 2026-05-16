@@ -20,6 +20,7 @@ SRC := \
   src/agent.c \
   src/openrouter.c \
   src/tools.c \
+  src/tools_meta.c \
   src/tools_fs.c \
   src/tools_proc.c \
   src/tools_watch.c \
@@ -51,10 +52,11 @@ clean:
 run: $(BIN)
 	./$(BIN) $(ARGS)
 
-test: $(BUILD)/tui_test $(BUILD)/agent_events_test $(BUILD)/security_test
+test: $(BUILD)/tui_test $(BUILD)/agent_events_test $(BUILD)/security_test $(BUILD)/tools_meta_test
 	./$(BUILD)/tui_test
 	./$(BUILD)/agent_events_test
 	./$(BUILD)/security_test
+	./$(BUILD)/tools_meta_test
 
 $(BUILD)/tui_test: tests/tui_test.c src/tui.c src/util.c
 	@mkdir -p $(dir $@)
@@ -67,3 +69,7 @@ $(BUILD)/agent_events_test: tests/agent_events_test.c src/agent.c src/util.c ven
 $(BUILD)/security_test: tests/security_test.c src/tools_proc.c src/tools_fs.c src/http.c src/util.c vendor/cJSON.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCS) tests/security_test.c src/tools_proc.c src/tools_fs.c src/http.c src/util.c vendor/cJSON.c $(LDLIBS) -o $@
+
+$(BUILD)/tools_meta_test: tests/tools_meta_test.c src/tools.c src/tools_meta.c src/tools_fs.c src/tools_proc.c src/tools_watch.c src/tools_net.c src/http.c src/memory.c src/util.c vendor/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCS) tests/tools_meta_test.c src/tools.c src/tools_meta.c src/tools_fs.c src/tools_proc.c src/tools_watch.c src/tools_net.c src/http.c src/memory.c src/util.c vendor/cJSON.c $(LDLIBS) -o $@

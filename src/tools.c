@@ -3,6 +3,7 @@
 #include "tools_proc.h"
 #include "tools_watch.h"
 #include "tools_net.h"
+#include "tools_meta.h"
 #include "util.h"
 #include "http.h"
 #include "memory.h"
@@ -436,9 +437,37 @@ static void add_string_prop(cJSON *params, const char *name, const char *desc) {
     cJSON_AddStringToObject(p, "description", desc);
 }
 
+static char *tool_list_tools(const ToolCtx *ctx) {
+    cJSON *tools = tools_describe(ctx);
+    Buf out;
+    buf_init(&out);
+    buf_append_cstr(&out, "LIST_TOOLS\n---\n");
+    int n = cJSON_IsArray(tools) ? cJSON_GetArraySize(tools) : 0;
+    for (int i = 0; i < n; i++) {
+        cJSON *tool = cJSON_GetArrayItem(tools, i);
+        cJSON *fn = tool ? cJSON_GetObjectItem(tool, "function") : NULL;
+        cJSON *name = fn ? cJSON_GetObjectItem(fn, "name") : NULL;
+        cJSON *desc = fn ? cJSON_GetObjectItem(fn, "description") : NULL;
+        if (cJSON_IsString(name) && name->valuestring) {
+            buf_printf(&out, "%s\t%s\n",
+                name->valuestring,
+                cJSON_IsString(desc) && desc->valuestring ? desc->valuestring : "");
+        }
+    }
+    cJSON_Delete(tools);
+    return out.data;
+}
+
 cJSON *tools_describe(const ToolCtx *ctx) {
     cJSON *arr = cJSON_CreateArray();
 
+    {   /* list_tools */
+        cJSON *p = param_obj(NULL);
+        cJSON_AddItemToArray(arr, make_function_tool(
+            "list_tools",
+            "List every tool currently visible to the model with one-line descriptions.",
+            p));
+    }
     {   /* read_file */
         const char *req[] = {"path", NULL};
         cJSON *p = param_obj(req);
@@ -497,6 +526,7 @@ cJSON *tools_describe(const ToolCtx *ctx) {
     }
 
     tools_fs_register(arr);
+    tools_meta_register(arr);
     tools_proc_register(arr, ctx ? ctx->allow_exec : 0);
     tools_watch_register(arr);
     tools_net_register(arr);
@@ -506,6 +536,7 @@ cJSON *tools_describe(const ToolCtx *ctx) {
 
 char *tools_dispatch(ToolCtx *ctx, const char *name, cJSON *args) {
     if (!name) return strdup("ERROR: missing tool name");
+    if (strcmp(name, "list_tools") == 0)   return tool_list_tools(ctx);
     if (strcmp(name, "read_file") == 0)    return tool_read_file(args);
     if (strcmp(name, "search_files") == 0) return tool_search_files(args);
     if (strcmp(name, "search_web") == 0)   return tool_search_web(args);
@@ -515,6 +546,7 @@ char *tools_dispatch(ToolCtx *ctx, const char *name, cJSON *args) {
 
     char *r;
     if ((r = tools_fs_dispatch(ctx, name, args)))    return r;
+    if ((r = tools_meta_dispatch(ctx, name, args)))  return r;
     if ((r = tools_proc_dispatch(ctx, name, args)))  return r;
     if ((r = tools_watch_dispatch(ctx, name, args))) return r;
     if ((r = tools_net_dispatch(ctx, name, args)))   return r;

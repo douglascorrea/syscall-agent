@@ -79,6 +79,22 @@ static void test_new_and_exit_commands(void) {
     expect_int("exit type", cmd.type, TUI_CMD_EXIT);
 }
 
+static void test_meta_commands(void) {
+    TuiCommand cmd;
+
+    expect_int("tools parse", tui_parse_command("/tools", &cmd), 1);
+    expect_int("tools type", cmd.type, TUI_CMD_TOOLS);
+
+    expect_int("skills parse", tui_parse_command("/skills", &cmd), 1);
+    expect_int("skills type", cmd.type, TUI_CMD_SKILLS);
+
+    expect_int("auth parse", tui_parse_command("/auth", &cmd), 1);
+    expect_int("auth type", cmd.type, TUI_CMD_AUTH);
+
+    expect_int("sysinfo parse", tui_parse_command("/sysinfo", &cmd), 1);
+    expect_int("sysinfo type", cmd.type, TUI_CMD_SYSINFO);
+}
+
 static void test_wrapping_fits_narrow_widths(void) {
     char **lines = NULL;
     size_t count = tui_wrap_plain("abcdefgh ijkl", 5, &lines);
@@ -100,6 +116,7 @@ int main(void) {
     test_verbose_command_accepts_required_modes();
     test_model_command_selects_predefined_models();
     test_new_and_exit_commands();
+    test_meta_commands();
     test_wrapping_fits_narrow_widths();
     return 0;
 }

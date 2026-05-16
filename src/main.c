@@ -37,6 +37,11 @@ static void usage(const char *argv0) {
         "ENVIRONMENT:\n"
         "  OPENROUTER_API_KEY    Required.\n"
         "  OPENROUTER_MODEL      Default model.\n"
+        "  BRAVE_SEARCH_API_KEY  Optional Brave Search API key for search_web.\n"
+        "  SYSCALL_AGENT_AUTH_PROVIDER\n"
+        "                        Descriptive provider label for auth_status.\n"
+        "  SYSCALL_AGENT_SKILLS_DIR\n"
+        "                        Optional directory containing name/SKILL.md packs.\n"
         "  SYSTEM_PROMPT_PATH    Default path to system prompt file.\n"
         "  MEMORY_PATH           Default path to memory file.\n",
         argv0);
