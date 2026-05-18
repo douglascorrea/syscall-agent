@@ -1,4 +1,5 @@
 #include "agent.h"
+#include "codex_provider.h"
 #include "openrouter.h"
 #include "tools.h"
 #include "tools_proc.h"
@@ -15,6 +16,13 @@ static long now_ms(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
+
+static int use_codex_provider(const AgentConfig *cfg) {
+    return cfg && cfg->provider &&
+        (strcmp(cfg->provider, "codex") == 0 ||
+         strcmp(cfg->provider, "openai-codex") == 0 ||
+         strcmp(cfg->provider, "chatgpt") == 0);
 }
 
 static cJSON *build_system_message(const AgentConfig *cfg) {
@@ -88,6 +96,165 @@ void agent_conversation_free(AgentConversation *conv) {
     free(conv);
 }
 
+char *agent_conversation_to_json(const AgentConversation *conv) {
+    if (!conv || !conv->messages) return NULL;
+    return cJSON_PrintUnformatted(conv->messages);
+}
+
+AgentConversation *agent_conversation_from_json(const AgentConfig *cfg,
+                                                const char *json) {
+    cJSON *messages = json ? cJSON_Parse(json) : NULL;
+    if (!cJSON_IsArray(messages)) {
+        if (messages) cJSON_Delete(messages);
+        return agent_conversation_new(cfg);
+    }
+    AgentConversation *conv = calloc(1, sizeof *conv);
+    if (!conv) {
+        cJSON_Delete(messages);
+        return NULL;
+    }
+    conv->messages = messages;
+    return conv;
+}
+
+size_t agent_conversation_estimate_tokens(const AgentConversation *conv) {
+    if (!conv || !conv->messages) return 0;
+    char *json = cJSON_PrintUnformatted(conv->messages);
+    if (!json) return 0;
+    size_t chars = strlen(json);
+    free(json);
+    return chars / 4 + 1;
+}
+
+int agent_conversation_message_count(const AgentConversation *conv) {
+    if (!conv || !conv->messages) return 0;
+    return cJSON_GetArraySize(conv->messages);
+}
+
+static int compaction_context_limit(const AgentConfig *cfg) {
+    return cfg && cfg->context_limit > 0 ? cfg->context_limit : 128000;
+}
+
+static int compaction_percent(const AgentConfig *cfg) {
+    return cfg && cfg->compaction_percent >= 50 ? cfg->compaction_percent : 75;
+}
+
+static void emit_event(AgentEventHandler handler, void *userdata,
+                       AgentEventType type, const char *title,
+                       const char *content);
+
+static char *build_compaction_transcript(cJSON *messages, int start, int end) {
+    Buf b;
+    buf_init(&b);
+    for (int i = start; i < end; i++) {
+        cJSON *msg = cJSON_GetArrayItem(messages, i);
+        cJSON *role = cJSON_GetObjectItem(msg, "role");
+        cJSON *content = cJSON_GetObjectItem(msg, "content");
+        const char *role_s = cJSON_IsString(role) ? role->valuestring : "message";
+        const char *content_s = cJSON_IsString(content) ? content->valuestring : "";
+        buf_printf(&b, "%s: %s\n\n", role_s, content_s);
+    }
+    return b.data ? b.data : strdup("");
+}
+
+static char *extract_assistant_content(cJSON *resp) {
+    cJSON *choices = cJSON_GetObjectItem(resp, "choices");
+    cJSON *choice0 = choices ? cJSON_GetArrayItem(choices, 0) : NULL;
+    cJSON *message = choice0 ? cJSON_GetObjectItem(choice0, "message") : NULL;
+    cJSON *content = message ? cJSON_GetObjectItem(message, "content") : NULL;
+    if (cJSON_IsString(content) && content->valuestring && *content->valuestring) {
+        return strdup(content->valuestring);
+    }
+    return NULL;
+}
+
+static char *compact_with_model(const AgentConfig *cfg, const char *transcript) {
+    const char *prompt = cfg && cfg->compaction_prompt && *cfg->compaction_prompt
+        ? cfg->compaction_prompt
+        : "Summarize this conversation for later continuation.";
+    const char *model = cfg && cfg->compaction_model && *cfg->compaction_model
+        ? cfg->compaction_model
+        : (cfg ? cfg->model : NULL);
+    if (!model || !*model || !cfg) return NULL;
+
+    cJSON *messages = cJSON_CreateArray();
+    cJSON *sys = cJSON_CreateObject();
+    cJSON_AddStringToObject(sys, "role", "system");
+    cJSON_AddStringToObject(sys, "content", prompt);
+    cJSON_AddItemToArray(messages, sys);
+    cJSON *user = cJSON_CreateObject();
+    cJSON_AddStringToObject(user, "role", "user");
+    cJSON_AddStringToObject(user, "content", transcript ? transcript : "");
+    cJSON_AddItemToArray(messages, user);
+
+    cJSON *resp = NULL;
+    if (use_codex_provider(cfg)) {
+        resp = codex_responses_chat(model, messages, NULL, 0);
+    } else if (cfg->api_key && *cfg->api_key) {
+        resp = openrouter_chat(cfg->api_key, model, messages, NULL, 0);
+    }
+    cJSON_Delete(messages);
+    if (!resp) return NULL;
+    char *summary = extract_assistant_content(resp);
+    cJSON_Delete(resp);
+    return summary;
+}
+
+static char *compact_locally(const char *transcript) {
+    const char *safe = transcript ? transcript : "";
+    size_t n = strlen(safe);
+    size_t keep = n > 8000 ? 8000 : n;
+    Buf b;
+    buf_init(&b);
+    buf_append_cstr(&b, "Local compaction summary of earlier conversation:\n");
+    if (n > keep) buf_append_cstr(&b, "[truncated]\n");
+    buf_append(&b, safe, keep);
+    return b.data;
+}
+
+static int maybe_compact_conversation(AgentConversation *conv,
+                                      const AgentConfig *cfg,
+                                      AgentEventHandler handler,
+                                      void *userdata) {
+    if (!conv || !conv->messages) return 0;
+    int count = cJSON_GetArraySize(conv->messages);
+    if (count <= 4) return 0;
+    int limit = compaction_context_limit(cfg);
+    int pct = compaction_percent(cfg);
+    size_t threshold = ((size_t)limit * (size_t)pct) / 100;
+    if (threshold == 0 || agent_conversation_estimate_tokens(conv) < threshold) return 0;
+
+    int keep_start = count - 4;
+    if (keep_start < 1) return 0;
+    char *transcript = build_compaction_transcript(conv->messages, 1, keep_start);
+    char *summary = compact_with_model(cfg, transcript);
+    if (!summary) summary = compact_locally(transcript);
+    free(transcript);
+    if (!summary) return -1;
+
+    cJSON *next = cJSON_CreateArray();
+    cJSON *system = cJSON_GetArrayItem(conv->messages, 0);
+    if (system) cJSON_AddItemToArray(next, cJSON_Duplicate(system, 1));
+    cJSON *summary_msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(summary_msg, "role", "system");
+    Buf content;
+    buf_init(&content);
+    buf_append_cstr(&content, "Compacted conversation summary:\n");
+    buf_append_cstr(&content, summary);
+    cJSON_AddStringToObject(summary_msg, "content", content.data ? content.data : summary);
+    buf_free(&content);
+    cJSON_AddItemToArray(next, summary_msg);
+    for (int i = keep_start; i < count; i++) {
+        cJSON *msg = cJSON_GetArrayItem(conv->messages, i);
+        cJSON_AddItemToArray(next, cJSON_Duplicate(msg, 1));
+    }
+    cJSON_Delete(conv->messages);
+    conv->messages = next;
+    free(summary);
+    emit_event(handler, userdata, AGENT_EVENT_STATUS, "agent", "conversation compacted");
+    return 1;
+}
+
 static void log_step_header(int step, int max, int verbose) {
     if (verbose) {
         fprintf(stderr, "\n=== step %d/%d ===\n", step + 1, max);
@@ -123,10 +290,14 @@ static void emit_event(AgentEventHandler handler, void *userdata,
     handler(&ev, userdata);
 }
 
+static int should_cancel(const AgentConfig *cfg) {
+    return cfg && cfg->should_cancel && cfg->should_cancel(cfg->cancel_userdata);
+}
+
 typedef struct {
     AgentEventHandler handler;
     void *userdata;
-    int verbose;
+    const AgentConfig *cfg;
 } AgentStreamForwarder;
 
 static void on_openrouter_stream(const OpenRouterStreamEvent *event, void *userdata) {
@@ -138,13 +309,13 @@ static void on_openrouter_stream(const OpenRouterStreamEvent *event, void *userd
                 "assistant", event->content ? event->content : "");
             break;
         case OPENROUTER_STREAM_REASONING_DELTA:
-            if ((f->verbose & AGENT_VERBOSE_REASONING) != 0) {
+            if ((f->cfg->verbose & AGENT_VERBOSE_REASONING) != 0) {
                 emit_event(f->handler, f->userdata, AGENT_EVENT_REASONING_DELTA,
                     "reasoning", event->content ? event->content : "");
             }
             break;
         case OPENROUTER_STREAM_TOOL_CALL_DELTA:
-            if ((f->verbose & AGENT_VERBOSE_TOOLS) != 0) {
+            if ((f->cfg->verbose & AGENT_VERBOSE_TOOLS) != 0) {
                 Buf b;
                 buf_init(&b);
                 if (event->tool_name && *event->tool_name) {
@@ -224,6 +395,11 @@ static int agent_run_messages_with_events(const AgentConfig *cfg,
     int rc = 0;
 
     for (int step = 0; step < cfg->max_steps; step++) {
+        if (should_cancel(cfg)) {
+            emit_event(handler, userdata, AGENT_EVENT_ERROR, "agent", "cancelled");
+            rc = 130;
+            goto done;
+        }
         if (!handler) log_step_header(step, cfg->max_steps, cfg->verbose);
         if (handler) {
             char status[64];
@@ -235,9 +411,15 @@ static int agent_run_messages_with_events(const AgentConfig *cfg,
         AgentStreamForwarder forwarder = {
             .handler = handler,
             .userdata = userdata,
-            .verbose = cfg->verbose
+            .cfg = cfg
         };
-        cJSON *resp = use_stream
+        cJSON *resp = use_codex_provider(cfg)
+            ? codex_responses_chat(
+                cfg->model,
+                messages,
+                tools,
+                (cfg->verbose & AGENT_VERBOSE_REASONING) != 0)
+            : use_stream
             ? openrouter_chat_stream(
                 cfg->api_key,
                 cfg->model,
@@ -245,7 +427,9 @@ static int agent_run_messages_with_events(const AgentConfig *cfg,
                 tools,
                 (cfg->verbose & AGENT_VERBOSE_REASONING) != 0,
                 on_openrouter_stream,
-                &forwarder)
+                &forwarder,
+                cfg->should_cancel,
+                cfg->cancel_userdata)
             : openrouter_chat(
                 cfg->api_key,
                 cfg->model,
@@ -253,6 +437,11 @@ static int agent_run_messages_with_events(const AgentConfig *cfg,
                 tools,
                 (cfg->verbose & AGENT_VERBOSE_REASONING) != 0);
         if (!resp) {
+            if (should_cancel(cfg)) {
+                emit_event(handler, userdata, AGENT_EVENT_ERROR, "agent", "cancelled");
+                rc = 130;
+                goto done;
+            }
             fprintf(stderr, "agent: no response\n");
             emit_event(handler, userdata, AGENT_EVENT_ERROR, "agent", "no response");
             rc = 1;
@@ -274,6 +463,12 @@ static int agent_run_messages_with_events(const AgentConfig *cfg,
         }
 
         cJSON *choices = cJSON_GetObjectItem(resp, "choices");
+        if (should_cancel(cfg)) {
+            cJSON_Delete(resp);
+            emit_event(handler, userdata, AGENT_EVENT_ERROR, "agent", "cancelled");
+            rc = 130;
+            goto done;
+        }
         cJSON *choice0 = choices ? cJSON_GetArrayItem(choices, 0) : NULL;
         cJSON *message = choice0 ? cJSON_GetObjectItem(choice0, "message") : NULL;
         if (!message) {
@@ -308,6 +503,12 @@ static int agent_run_messages_with_events(const AgentConfig *cfg,
         if (cJSON_IsArray(tool_calls) && cJSON_GetArraySize(tool_calls) > 0) {
             int n = cJSON_GetArraySize(tool_calls);
             for (int i = 0; i < n; i++) {
+                if (should_cancel(cfg)) {
+                    cJSON_Delete(resp);
+                    emit_event(handler, userdata, AGENT_EVENT_ERROR, "agent", "cancelled");
+                    rc = 130;
+                    goto done;
+                }
                 cJSON *tc = cJSON_GetArrayItem(tool_calls, i);
                 cJSON *id = cJSON_GetObjectItem(tc, "id");
                 cJSON *fn = cJSON_GetObjectItem(tc, "function");
@@ -408,6 +609,11 @@ int agent_conversation_run_with_events(AgentConversation *conv,
         return 1;
     }
     cJSON_AddItemToArray(conv->messages, build_user_message(user_prompt));
+    if (maybe_compact_conversation(conv, cfg, handler, userdata) < 0) {
+        emit_event(handler, userdata, AGENT_EVENT_ERROR,
+            "agent", "conversation compaction failed");
+        return 1;
+    }
     return agent_run_messages_with_events(cfg, conv->messages, handler, userdata);
 }
 

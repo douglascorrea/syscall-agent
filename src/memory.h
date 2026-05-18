@@ -1,5 +1,5 @@
-#ifndef LLA_MEMORY_H
-#define LLA_MEMORY_H
+#ifndef CEZAR_MEMORY_H
+#define CEZAR_MEMORY_H
 
 #include <stddef.h>
 

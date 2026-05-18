@@ -12,6 +12,7 @@ static int first_turn_user_count = 0;
 static int second_turn_user_count = 0;
 static int second_turn_saw_first_assistant = 0;
 static int after_reset_user_count = 0;
+static int compaction_calls = 0;
 
 char *memory_load(const char *path, size_t *out_len) {
     (void)path;
@@ -75,9 +76,13 @@ cJSON *openrouter_chat(const char *api_key,
                        cJSON *tools,
                        int want_reasoning) {
     (void)api_key;
-    (void)model;
     (void)tools;
     (void)want_reasoning;
+    if (model && strcmp(model, "compact/model") == 0) {
+        compaction_calls++;
+        inspect_messages(messages, &(int){0}, &(int){0});
+        return make_response("summary compacted");
+    }
     chat_calls++;
     int saw = 0;
     if (chat_calls == 1) {
@@ -98,7 +103,9 @@ cJSON *openrouter_chat_stream(const char *api_key,
                               cJSON *tools,
                               int want_reasoning,
                               OpenRouterStreamHandler handler,
-                              void *userdata) {
+                              void *userdata,
+                              OpenRouterShouldCancelFn should_cancel,
+                              void *cancel_userdata) {
     (void)api_key;
     (void)model;
     (void)messages;
@@ -106,6 +113,8 @@ cJSON *openrouter_chat_stream(const char *api_key,
     (void)want_reasoning;
     (void)handler;
     (void)userdata;
+    (void)should_cancel;
+    (void)cancel_userdata;
     return NULL;
 }
 
@@ -119,6 +128,19 @@ static void expect_int(const char *name, int got, int want) {
         fprintf(stderr, "%s: got %d want %d\n", name, got, want);
         exit(1);
     }
+}
+
+static void expect_contains(const char *name, const char *got, const char *want) {
+    if (!got || !strstr(got, want)) {
+        fprintf(stderr, "%s: got '%s' expected substring '%s'\n",
+            name, got ? got : "(null)", want);
+        exit(1);
+    }
+}
+
+static int always_cancel(void *userdata) {
+    (void)userdata;
+    return 1;
 }
 
 int main(void) {
@@ -153,6 +175,37 @@ int main(void) {
         agent_conversation_run_with_events(conv, &cfg, "after reset", ignore_event, NULL), 0);
     expect_int("after reset users", after_reset_user_count, 1);
 
+    AgentConfig cancel_cfg = cfg;
+    cancel_cfg.should_cancel = always_cancel;
+    int calls_before_cancel = chat_calls;
+    expect_int("cancelled run rc",
+        agent_conversation_run_with_events(conv, &cancel_cfg, "cancelled", ignore_event, NULL), 130);
+    expect_int("cancelled run made no model call", chat_calls, calls_before_cancel);
+
     agent_conversation_free(conv);
+
+    AgentConfig compact_cfg = cfg;
+    compact_cfg.context_limit = 16;
+    compact_cfg.compaction_percent = 50;
+    compact_cfg.compaction_model = "compact/model";
+    compact_cfg.compaction_prompt = "compact this transcript";
+    AgentConversation *compact_conv = agent_conversation_new(&compact_cfg);
+    expect_int("compact run one",
+        agent_conversation_run_with_events(compact_conv, &compact_cfg,
+            "first long message that should count toward context", ignore_event, NULL), 0);
+    expect_int("compact run two",
+        agent_conversation_run_with_events(compact_conv, &compact_cfg,
+            "second long message that should count toward context", ignore_event, NULL), 0);
+    expect_int("compact run three",
+        agent_conversation_run_with_events(compact_conv, &compact_cfg,
+            "third long message that triggers compaction", ignore_event, NULL), 0);
+    if (compaction_calls < 1) {
+        fprintf(stderr, "expected at least one compaction call\n");
+        return 1;
+    }
+    char *compact_json = agent_conversation_to_json(compact_conv);
+    expect_contains("compacted conversation summary", compact_json, "summary compacted");
+    free(compact_json);
+    agent_conversation_free(compact_conv);
     return 0;
 }

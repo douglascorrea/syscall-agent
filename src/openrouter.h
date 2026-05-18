@@ -1,5 +1,5 @@
-#ifndef LLA_OPENROUTER_H
-#define LLA_OPENROUTER_H
+#ifndef CEZAR_OPENROUTER_H
+#define CEZAR_OPENROUTER_H
 
 #include "../vendor/cJSON.h"
 
@@ -20,6 +20,7 @@ typedef struct {
 } OpenRouterStreamEvent;
 
 typedef void (*OpenRouterStreamHandler)(const OpenRouterStreamEvent *event, void *userdata);
+typedef int (*OpenRouterShouldCancelFn)(void *userdata);
 
 /* Sends a chat completion request to OpenRouter.
  *
@@ -43,6 +44,8 @@ cJSON *openrouter_chat_stream(const char *api_key,
                               cJSON *tools,
                               int want_reasoning,
                               OpenRouterStreamHandler handler,
-                              void *userdata);
+                              void *userdata,
+                              OpenRouterShouldCancelFn should_cancel,
+                              void *cancel_userdata);
 
 #endif

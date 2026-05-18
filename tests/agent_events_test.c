@@ -89,7 +89,9 @@ cJSON *openrouter_chat_stream(const char *api_key,
                               cJSON *tools,
                               int want_reasoning,
                               OpenRouterStreamHandler handler,
-                              void *userdata) {
+                              void *userdata,
+                              OpenRouterShouldCancelFn should_cancel,
+                              void *cancel_userdata) {
     (void)api_key;
     (void)model;
     (void)messages;
@@ -97,6 +99,8 @@ cJSON *openrouter_chat_stream(const char *api_key,
     (void)want_reasoning;
     (void)handler;
     (void)userdata;
+    (void)should_cancel;
+    (void)cancel_userdata;
     return NULL;
 }
 

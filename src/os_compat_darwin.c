@@ -70,7 +70,7 @@ static const char *profile_sbpl(const char *name) {
 
     /* Common allowlist any non-trivial command needs: /dev/null, tmpdirs,
      * tty I/O. Inserted into every profile below. */
-#define LLA_COMMON_FILE_WRITES \
+#define CEZAR_COMMON_FILE_WRITES \
     "(allow file-write* (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))" \
     "(allow file-write* (subpath \"/private/tmp\") (subpath \"/tmp\") (subpath \"/var/tmp\") (subpath \"/private/var/folders\"))" \
     "(allow file-write-data (literal \"/dev/tty\"))"
@@ -86,7 +86,7 @@ static const char *profile_sbpl(const char *name) {
         "(allow process-info*)"
         "(allow signal (target self))"
         "(allow file-read*)"
-        LLA_COMMON_FILE_WRITES
+        CEZAR_COMMON_FILE_WRITES
         "(allow sysctl-read)"
         "(allow mach-lookup)"
         "(allow ipc-posix-shm)";
@@ -99,7 +99,7 @@ static const char *profile_sbpl(const char *name) {
         "(allow process*)"
         "(allow signal (target self))"
         "(allow file-read*)"
-        LLA_COMMON_FILE_WRITES
+        CEZAR_COMMON_FILE_WRITES
         "(allow sysctl-read)"
         "(allow mach-lookup)"
         "(allow ipc-posix-shm)";
@@ -112,7 +112,7 @@ static const char *profile_sbpl(const char *name) {
         "(allow process*)"
         "(allow signal (target self))"
         "(allow file-read*)"
-        LLA_COMMON_FILE_WRITES
+        CEZAR_COMMON_FILE_WRITES
         "(allow sysctl-read)"
         "(allow mach-lookup)"
         "(allow ipc-posix-shm)"

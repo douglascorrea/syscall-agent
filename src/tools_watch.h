@@ -1,5 +1,5 @@
-#ifndef LLA_TOOLS_WATCH_H
-#define LLA_TOOLS_WATCH_H
+#ifndef CEZAR_TOOLS_WATCH_H
+#define CEZAR_TOOLS_WATCH_H
 
 #include "tools.h"
 #include "../vendor/cJSON.h"

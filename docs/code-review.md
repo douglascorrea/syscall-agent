@@ -47,7 +47,7 @@ No blocking correctness, security, or regression findings remain open.
 
 ## Residual Risk
 
-- `syscall-agent` remains intentionally powerful when `--allow-exec` is enabled.
+- `cezar` remains intentionally powerful when `--allow-exec` is enabled.
   The default-off registration, profile validation, resource limits, and macOS
   sandboxing reduce that risk, but untrusted repositories should still be run in
   disposable workspaces.

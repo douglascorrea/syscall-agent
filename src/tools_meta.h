@@ -1,5 +1,5 @@
-#ifndef LLA_TOOLS_META_H
-#define LLA_TOOLS_META_H
+#ifndef CEZAR_TOOLS_META_H
+#define CEZAR_TOOLS_META_H
 
 #include "tools.h"
 

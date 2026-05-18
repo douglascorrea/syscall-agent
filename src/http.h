@@ -1,5 +1,5 @@
-#ifndef LLA_HTTP_H
-#define LLA_HTTP_H
+#ifndef CEZAR_HTTP_H
+#define CEZAR_HTTP_H
 
 #include <stddef.h>
 

@@ -1,5 +1,5 @@
-#ifndef LLA_OPENROUTER_MODELS_H
-#define LLA_OPENROUTER_MODELS_H
+#ifndef CEZAR_OPENROUTER_MODELS_H
+#define CEZAR_OPENROUTER_MODELS_H
 
 #include <stddef.h>
 

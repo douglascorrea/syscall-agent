@@ -1,5 +1,5 @@
-#ifndef LLA_OS_COMPAT_H
-#define LLA_OS_COMPAT_H
+#ifndef CEZAR_OS_COMPAT_H
+#define CEZAR_OS_COMPAT_H
 
 #include <stddef.h>
 #include "util.h"

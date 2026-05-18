@@ -40,7 +40,7 @@ capabilities.
 
 ## Ready Now
 
-- Public repo name and README match the project direction: `syscall-agent`.
+- Public repo name and README match the project direction: `cezar`.
 - Build and test commands are documented.
 - Tool capabilities and exec safety model are documented.
 - Security and code-review reports are tracked under `docs/`.

@@ -1,5 +1,5 @@
-#ifndef LLA_TOOLS_H
-#define LLA_TOOLS_H
+#ifndef CEZAR_TOOLS_H
+#define CEZAR_TOOLS_H
 
 #include "../vendor/cJSON.h"
 

@@ -85,11 +85,15 @@ cJSON *openrouter_chat_stream(const char *api_key,
                               cJSON *tools,
                               int want_reasoning,
                               OpenRouterStreamHandler handler,
-                              void *userdata) {
+                              void *userdata,
+                              OpenRouterShouldCancelFn should_cancel,
+                              void *cancel_userdata) {
     (void)api_key;
     (void)model;
     (void)messages;
     (void)tools;
+    (void)should_cancel;
+    (void)cancel_userdata;
     if (want_reasoning) {
         OpenRouterStreamEvent ev = {
             .type = OPENROUTER_STREAM_REASONING_DELTA,

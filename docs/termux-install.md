@@ -1,6 +1,6 @@
 # Android Termux install
 
-These instructions install and run `syscall-agent` directly inside Termux on
+These instructions install and run `cezar` directly inside Termux on
 Android.
 
 Official Termux notes that the main app and plugin apps must come from the same
@@ -45,15 +45,15 @@ pkg install libcurl
 ## 3. Clone and build
 
 ```sh
-git clone https://github.com/douglascorrea/syscall-agent.git
-cd syscall-agent
+git clone https://github.com/douglascorrea/cezar.git
+cd cezar
 make
 ```
 
 The binary is written to:
 
 ```sh
-build/agent
+build/cezar
 ```
 
 Run the test suite:
@@ -64,7 +64,7 @@ make test
 
 ## 4. Configure the model backend
 
-`syscall-agent` currently calls OpenRouter. Export your key before running it:
+`cezar` currently calls OpenRouter. Export your key before running it:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
@@ -77,20 +77,20 @@ For a persistent Termux setup, add the export to `~/.bashrc` or `~/.zshrc`.
 CLI prompt:
 
 ```sh
-./build/agent "inspect this repo and summarize the C modules"
+./build/cezar "inspect this repo and summarize the C modules"
 ```
 
 Interactive TUI:
 
 ```sh
-./build/agent --tui
+./build/cezar --tui
 ```
 
 Subprocess tools are still disabled by default. Enable them only in a workspace
 you trust:
 
 ```sh
-./build/agent --allow-exec --tui
+./build/cezar --allow-exec --tui
 ```
 
 ## 6. Enable Android device integrations
@@ -118,7 +118,7 @@ exist.
 
 ## Termux-focused tools
 
-`syscall-agent` adds these Termux-aware tools. They use fixed `termux-*`
+`cezar` adds these Termux-aware tools. They use fixed `termux-*`
 commands through `execvp`, never through a shell.
 
 | Tool | What it does | Requires |

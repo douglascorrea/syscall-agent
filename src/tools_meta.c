@@ -1,4 +1,5 @@
 #include "tools_meta.h"
+#include "auth.h"
 #include "util.h"
 
 #include <ctype.h>
@@ -208,9 +209,9 @@ static int has_sensitive_word(const char *s) {
 
 static int safe_env_name(const char *name) {
     if (!name || !*name) return 0;
-    if (strncmp(name, "SYSCALL_AGENT_", 14) == 0) return 1;
-    if (strncmp(name, "LLA_", 4) == 0) return 1;
+    if (strncmp(name, "CEZAR_", 6) == 0) return 1;
     if (strcmp(name, "OPENROUTER_MODEL") == 0) return 1;
+    if (strcmp(name, "OPENAI_MODEL") == 0) return 1;
     if (strcmp(name, "SYSTEM_PROMPT_PATH") == 0) return 1;
     if (strcmp(name, "MEMORY_PATH") == 0) return 1;
     if (strcmp(name, "BRAVE_SEARCH_API_KEY") == 0) return 1;
@@ -232,7 +233,7 @@ static void append_home_path(Buf *out, const char *suffix) {
 
 static char *tool_auth_status(cJSON *args) {
     (void)args;
-    const char *provider = getenv_or("SYSCALL_AGENT_AUTH_PROVIDER", "openrouter");
+    const char *provider = getenv_or("CEZAR_AUTH_PROVIDER", "openrouter");
     const char *openrouter_key = getenv("OPENROUTER_API_KEY");
     const char *openai_key = getenv("OPENAI_API_KEY");
     const char *gh_token = getenv("GH_TOKEN");
@@ -250,6 +251,8 @@ static char *tool_auth_status(cJSON *args) {
     Buf out;
     buf_init(&out);
     buf_printf(&out, "AUTH_STATUS provider=%s\n---\n", provider);
+    buf_printf(&out, "model_provider: %s\n",
+        getenv_or("CEZAR_PROVIDER", "openrouter"));
     buf_printf(&out, "openrouter_api_key: %s\n",
         (openrouter_key && *openrouter_key) ? "set" : "missing");
     buf_printf(&out, "openai_api_key: %s\n",
@@ -261,12 +264,38 @@ static char *tool_auth_status(cJSON *args) {
         (gh_token && *gh_token) ? "github token env is set" : "missing GH_TOKEN/GITHUB_TOKEN");
     buf_append_cstr(&out,
         "\nNotes:\n"
-        "- This agent currently sends model requests through OpenRouter.\n"
-        "- Codex OAuth and GitHub Copilot subscription credentials are detected for operator visibility only.\n"
-        "- It does not scrape, print, or repurpose those subscription tokens as API keys.\n");
+        "- This agent sends model requests through OpenRouter by default.\n"
+        "- With CEZAR_PROVIDER=codex, model requests use local Codex ChatGPT auth against the Codex Responses backend.\n"
+        "- Use auth_login(provider='codex') or /login codex to run the supported Codex/OpenAI sign-in flow.\n"
+        "- Use auth_login(provider='copilot') or /login copilot to run the supported GitHub Copilot sign-in flow.\n"
+        "- It does not print subscription tokens; direct Codex backend use only happens when CEZAR_PROVIDER=codex is set.\n");
 
     buf_free(&codex_path);
     return out.data;
+}
+
+static char *tool_auth_login(ToolCtx *ctx, cJSON *args) {
+    if (!ctx || !ctx->allow_exec) {
+        return strdup("ERROR: auth_login requires --allow-exec");
+    }
+    char *provider = dup_or_default(cJSON_GetObjectItem(args, "provider"), NULL);
+    char *host = dup_or_default(cJSON_GetObjectItem(args, "host"), NULL);
+    cJSON *free_j = cJSON_GetObjectItem(args, "free");
+    cJSON *dry_j = cJSON_GetObjectItem(args, "dry_run");
+    cJSON *timeout_j = cJSON_GetObjectItem(args, "timeout_ms");
+    int free_flow = cJSON_IsTrue(free_j);
+    int dry_run = cJSON_IsTrue(dry_j);
+    int timeout_ms = cJSON_IsNumber(timeout_j) ? (int)timeout_j->valueint : 300000;
+    if (!provider) {
+        free(host);
+        return strdup("ERROR: missing required arg 'provider'");
+    }
+    char *result = dry_run
+        ? auth_login_preview(provider, host, free_flow)
+        : auth_login_capture(provider, host, free_flow, timeout_ms);
+    free(provider);
+    free(host);
+    return result;
 }
 
 static char *tool_system_info(cJSON *args) {
@@ -470,11 +499,11 @@ static char *tool_grep_text(cJSON *args) {
 }
 
 static void append_skill_roots(Buf *roots) {
-    const char *custom = getenv("SYSCALL_AGENT_SKILLS_DIR");
+    const char *custom = getenv("CEZAR_SKILLS_DIR");
     if (custom && *custom) buf_printf(roots, "%s\n", custom);
     buf_append_cstr(roots, "skills\n");
     const char *home = getenv("HOME");
-    if (home && *home) buf_printf(roots, "%s/.syscall-agent/skills\n", home);
+    if (home && *home) buf_printf(roots, "%s/.cezar/skills\n", home);
 }
 
 static int safe_skill_name(const char *name) {
@@ -514,7 +543,7 @@ static char *tool_list_skills(cJSON *args) {
     if (!any) {
         buf_append_cstr(&out,
             "(no skills found)\n"
-            "Checked SYSCALL_AGENT_SKILLS_DIR, ./skills, and ~/.syscall-agent/skills.\n");
+            "Checked CEZAR_SKILLS_DIR, ./skills, and ~/.cezar/skills.\n");
     }
     free(copy);
     buf_free(&roots);
@@ -742,7 +771,7 @@ void tools_meta_register(cJSON *arr, int allow_delegates) {
         cJSON *p = param_obj(NULL);
         cJSON_AddItemToArray(arr, make_function_tool(
             "list_skills",
-            "List local skill packs from SYSCALL_AGENT_SKILLS_DIR, ./skills, and ~/.syscall-agent/skills.",
+            "List local skill packs from CEZAR_SKILLS_DIR, ./skills, and ~/.cezar/skills.",
             p));
     }
     {
@@ -752,6 +781,19 @@ void tools_meta_register(cJSON *arr, int allow_delegates) {
         cJSON_AddItemToArray(arr, make_function_tool(
             "read_skill",
             "Read a local skill pack's SKILL.md by safe skill name.",
+            p));
+    }
+    if (allow_delegates) {
+        const char *req[] = {"provider", NULL};
+        cJSON *p = param_obj(req);
+        add_prop(p, "provider", "string", "Auth provider to login to: codex/openai or copilot/github.");
+        add_prop(p, "host", "string", "Optional GitHub Enterprise host for Copilot login.");
+        add_prop(p, "free", "boolean", "For Codex/OpenAI, run codex --free instead of codex --login.");
+        add_prop(p, "dry_run", "boolean", "Return the command that would run without executing it.");
+        add_prop(p, "timeout_ms", "integer", "Kill login command after N ms. Default 300000, cap 600000.");
+        cJSON_AddItemToArray(arr, make_function_tool(
+            "auth_login",
+            "Start a supported subscription login flow through the official local client: codex --login/--free or copilot login. Does not read or print tokens.",
             p));
     }
     if (allow_delegates) {
@@ -786,6 +828,7 @@ char *tools_meta_dispatch(ToolCtx *ctx, const char *name, cJSON *args) {
     if (strcmp(name, "grep_text") == 0)    return tool_grep_text(args);
     if (strcmp(name, "list_skills") == 0)  return tool_list_skills(args);
     if (strcmp(name, "read_skill") == 0)   return tool_read_skill(args);
+    if (strcmp(name, "auth_login") == 0) return tool_auth_login(ctx, args);
     if (strcmp(name, "delegate_codex") == 0) return tool_delegate_codex(ctx, args);
     if (strcmp(name, "delegate_copilot") == 0) return tool_delegate_copilot(ctx, args);
     return NULL;

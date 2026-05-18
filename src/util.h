@@ -1,5 +1,5 @@
-#ifndef LLA_UTIL_H
-#define LLA_UTIL_H
+#ifndef CEZAR_UTIL_H
+#define CEZAR_UTIL_H
 
 #include <stddef.h>
 

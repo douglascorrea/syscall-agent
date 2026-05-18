@@ -5,6 +5,7 @@
 #include "tools_net.h"
 #include "tools_meta.h"
 #include "tools_termux.h"
+#include "extensions.h"
 #include "util.h"
 #include "http.h"
 #include "memory.h"
@@ -532,6 +533,7 @@ cJSON *tools_describe(const ToolCtx *ctx) {
     tools_proc_register(arr, ctx ? ctx->allow_exec : 0);
     tools_watch_register(arr);
     tools_net_register(arr);
+    extensions_register(arr, ctx);
 
     return arr;
 }
@@ -553,6 +555,7 @@ char *tools_dispatch(ToolCtx *ctx, const char *name, cJSON *args) {
     if ((r = tools_proc_dispatch(ctx, name, args)))  return r;
     if ((r = tools_watch_dispatch(ctx, name, args))) return r;
     if ((r = tools_net_dispatch(ctx, name, args)))   return r;
+    if ((r = extensions_dispatch(ctx, name, args)))  return r;
 
     Buf b;
     buf_init(&b);

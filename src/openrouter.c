@@ -35,8 +35,8 @@ static void make_headers(Buf *auth, const char *api_key, const char **headers) {
     buf_init(auth);
     buf_printf(auth, "Authorization: Bearer %s", api_key);
     headers[0] = auth->data;
-    headers[1] = "HTTP-Referer: https://github.com/douglascorrea/syscall-agent";
-    headers[2] = "X-Title: syscall-agent";
+    headers[1] = "HTTP-Referer: https://github.com/douglascorrea/cezar";
+    headers[2] = "X-Title: cezar";
     headers[3] = NULL;
 }
 
@@ -85,6 +85,8 @@ typedef struct {
     char error_msg[512];
     OpenRouterStreamHandler handler;
     void *userdata;
+    OpenRouterShouldCancelFn should_cancel;
+    void *cancel_userdata;
 } StreamState;
 
 static void emit_stream(StreamState *st, const OpenRouterStreamEvent *event) {
@@ -256,7 +258,9 @@ static void process_sse_line(StreamState *st, const char *line) {
 static size_t stream_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     StreamState *st = userdata;
     size_t n = size * nmemb;
+    if (st->should_cancel && st->should_cancel(st->cancel_userdata)) return 0;
     for (size_t i = 0; i < n; i++) {
+        if (st->should_cancel && st->should_cancel(st->cancel_userdata)) return 0;
         char ch = ptr[i];
         if (ch == '\n') {
             size_t len = st->line.len;
@@ -309,7 +313,9 @@ cJSON *openrouter_chat_stream(const char *api_key,
                               cJSON *tools,
                               int want_reasoning,
                               OpenRouterStreamHandler handler,
-                              void *userdata) {
+                              void *userdata,
+                              OpenRouterShouldCancelFn should_cancel,
+                              void *cancel_userdata) {
     char *body = make_request_body(model, messages, tools, want_reasoning, 1);
     Buf auth;
     const char *headers[4];
@@ -323,6 +329,8 @@ cJSON *openrouter_chat_stream(const char *api_key,
     st.reasoning_details = cJSON_CreateArray();
     st.handler = handler;
     st.userdata = userdata;
+    st.should_cancel = should_cancel;
+    st.cancel_userdata = cancel_userdata;
 
     HttpResponse r = http_post_json_stream(
         "https://openrouter.ai/api/v1/chat/completions",

@@ -54,7 +54,7 @@ static void test_http_rejects_non_http_schemes(void) {
 }
 
 static void test_write_file_masks_special_mode_bits(void) {
-    char path[] = "/tmp/syscall-agent-security-test.XXXXXX";
+    char path[] = "/tmp/cezar-security-test.XXXXXX";
     int fd = mkstemp(path);
     if (fd < 0) {
         perror("mkstemp");

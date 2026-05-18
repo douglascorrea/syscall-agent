@@ -5,7 +5,7 @@ Date: 2026-05-16
 ## Objective Restated
 
 Research current coding-agent pain points using web search plus Chrome browsing
-of Reddit and X/Twitter, derive 15 useful ideas for `syscall-agent`, implement
+of Reddit and X/Twitter, derive 15 useful ideas for `cezar`, implement
 those ideas, add supported Codex/Copilot subscription paths, add skills as
 commands, improve tool-use visibility, perform code/security/open-source
 reviews, then merge to `master` and push.
@@ -30,16 +30,16 @@ reviews, then merge to `master` and push.
 | Code review with review skill | `docs/code-review.md` written after loading the code-review workflow; no blocking findings remain open. |
 | Open-source review | `docs/open-source-review.md` documents license/contribution/security-policy readiness gaps. |
 | Merge to master via PR | PR #1 and PR #2 were merged to `master` with merge commits. |
-| Push public repo | `douglascorrea/syscall-agent` is public and local `master` tracks `syscall-agent/master`. |
+| Push public repo | `douglascorrea/cezar` is public and local `master` tracks `cezar/master`. |
 
 ## Current Verification
 
 - `make test`
 - `make`
 - `git diff --check`
-- `gh pr view 1 --repo douglascorrea/syscall-agent --json state,mergedAt,mergeCommit,url,title`
-- `gh pr view 2 --repo douglascorrea/syscall-agent --json state,mergedAt,mergeCommit,url,title`
-- `gh repo view douglascorrea/syscall-agent --json nameWithOwner,visibility,defaultBranchRef,url`
+- `gh pr view 1 --repo douglascorrea/cezar --json state,mergedAt,mergeCommit,url,title`
+- `gh pr view 2 --repo douglascorrea/cezar --json state,mergedAt,mergeCommit,url,title`
+- `gh repo view douglascorrea/cezar --json nameWithOwner,visibility,defaultBranchRef,url`
 
 ## Merged Commits
 

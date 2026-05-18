@@ -1,5 +1,8 @@
 #include "tui.h"
+#include "auth.h"
+#include "extensions.h"
 #include "openrouter_models.h"
+#include "session_store.h"
 #include "util.h"
 
 #include <ctype.h>
@@ -7,11 +10,13 @@
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/ioctl.h>
 #include <termios.h>
@@ -80,7 +85,24 @@ typedef struct {
     size_t model_scroll;
     char *owned_model_id;
     AgentConversation *conversation;
+    char session_id[CEZAR_SESSION_UUID_LEN];
+    char session_name[256];
+    char **history;
+    size_t history_len;
+    size_t history_cap;
+    size_t history_cursor;
+    pthread_mutex_t ui_lock;
+    pthread_t worker;
+    int worker_started;
+    int worker_done;
+    volatile sig_atomic_t cancel_requested;
+    char *steer_text;
 } TuiApp;
+
+typedef struct {
+    TuiApp *app;
+    char *prompt;
+} AgentRunTask;
 
 typedef enum {
     TUI_KEY_NONE,
@@ -190,6 +212,68 @@ int tui_parse_command(const char *line, TuiCommand *out) {
     }
     if ((cmd_len == 7 && strncmp(cmd, "sysinfo", 7) == 0) && *arg == '\0') {
         out->type = TUI_CMD_SYSINFO;
+        return 1;
+    }
+    if ((cmd_len == 10 && strncmp(cmd, "extensions", 10) == 0) && *arg == '\0') {
+        out->type = TUI_CMD_EXTENSIONS;
+        return 1;
+    }
+    if ((cmd_len == 5 && strncmp(cmd, "steer", 5) == 0) ||
+        (cmd_len == 4 && strncmp(cmd, "teer", 4) == 0)) {
+        if (*arg == '\0') {
+            out->type = TUI_CMD_UNKNOWN;
+            out->error = "usage: /steer INSTRUCTION";
+            return 1;
+        }
+        out->type = TUI_CMD_STEER;
+        out->arg = arg;
+        return 1;
+    }
+    if ((cmd_len == 8 && strncmp(cmd, "settings", 8) == 0)) {
+        out->type = TUI_CMD_SETTINGS;
+        out->arg = arg;
+        return 1;
+    }
+    if ((cmd_len == 7 && strncmp(cmd, "compact", 7) == 0)) {
+        int pct = 0;
+        if (!parse_positive_int(arg, &pct) || pct < 50 || pct > 95) {
+            out->type = TUI_CMD_UNKNOWN;
+            out->error = "usage: /compact 50..95";
+            return 1;
+        }
+        out->type = TUI_CMD_COMPACT;
+        out->percent = pct;
+        return 1;
+    }
+    if ((cmd_len == 5 && strncmp(cmd, "login", 5) == 0)) {
+        if (*arg == '\0') {
+            out->type = TUI_CMD_UNKNOWN;
+            out->error = "usage: /login codex|copilot [host]";
+            return 1;
+        }
+        out->type = TUI_CMD_LOGIN;
+        out->arg = arg;
+        return 1;
+    }
+    if (((cmd_len == 8 && strncmp(cmd, "sessions", 8) == 0) ||
+         (cmd_len == 7 && strncmp(cmd, "session", 7) == 0)) && *arg == '\0') {
+        out->type = TUI_CMD_SESSIONS;
+        return 1;
+    }
+    if ((cmd_len == 6 && strncmp(cmd, "resume", 6) == 0) ||
+        (cmd_len == 8 && strncmp(cmd, "continue", 8) == 0)) {
+        out->type = TUI_CMD_RESUME;
+        out->arg = *arg ? arg : NULL;
+        return 1;
+    }
+    if ((cmd_len == 6 && strncmp(cmd, "rename", 6) == 0)) {
+        if (*arg == '\0') {
+            out->type = TUI_CMD_UNKNOWN;
+            out->error = "usage: /rename NAME";
+            return 1;
+        }
+        out->type = TUI_CMD_RENAME;
+        out->arg = arg;
         return 1;
     }
     if (cmd_len == 5 && strncmp(cmd, "model", 5) == 0) {
@@ -329,6 +413,69 @@ void tui_free_lines(char **lines, size_t count) {
     free(lines);
 }
 
+size_t tui_build_input_lines(const char *input, int width, char ***out_lines) {
+    char **lines = NULL;
+    size_t len = 0, cap = 0;
+    int content_width = width > 2 ? width - 2 : 1;
+    const char *p = input ? input : "";
+    int first = 1;
+
+    do {
+        const char *nl = strchr(p, '\n');
+        size_t part_len = nl ? (size_t)(nl - p) : strlen(p);
+        char *part = lla_strndup(p, part_len);
+        if (!part) break;
+
+        char **wrapped = NULL;
+        size_t wrapped_count = tui_wrap_plain(part, content_width, &wrapped);
+        for (size_t i = 0; i < wrapped_count; i++) {
+            const char *prefix = first ? "› " : "  ";
+            Buf b;
+            buf_init(&b);
+            buf_append_cstr(&b, prefix);
+            buf_append_cstr(&b, wrapped[i] ? wrapped[i] : "");
+            push_line(&lines, &len, &cap, b.data ? b.data : "", b.len);
+            buf_free(&b);
+            first = 0;
+        }
+        tui_free_lines(wrapped, wrapped_count);
+        free(part);
+
+        if (!nl) break;
+        p = nl + 1;
+    } while (1);
+
+    if (len == 0) push_line(&lines, &len, &cap, "› ", 4);
+    *out_lines = lines;
+    return len;
+}
+
+int tui_history_apply(const char *const *items,
+                      size_t len,
+                      int direction,
+                      size_t *cursor,
+                      char *input,
+                      size_t input_cap) {
+    if (!items || len == 0 || !cursor || !input || input_cap == 0) return 0;
+    if (*cursor > len) *cursor = len;
+    if (direction < 0) {
+        if (*cursor == 0) return 0;
+        (*cursor)--;
+    } else if (direction > 0) {
+        if (*cursor >= len) return 0;
+        (*cursor)++;
+    } else {
+        return 0;
+    }
+
+    if (*cursor == len) {
+        input[0] = '\0';
+        return 1;
+    }
+    snprintf(input, input_cap, "%s", items[*cursor] ? items[*cursor] : "");
+    return 1;
+}
+
 static void render_lines_free(RenderLines *rl) {
     for (size_t i = 0; i < rl->len; i++) free(rl->items[i].text);
     free(rl->items);
@@ -455,6 +602,71 @@ static void free_entries(TuiApp *app) {
     free(app->entries);
     app->entries = NULL;
     app->cap = 0;
+}
+
+static int history_append_item(TuiApp *app, const char *line) {
+    if (!line || !*line) return 0;
+    if (app->history_len > 0 &&
+        strcmp(app->history[app->history_len - 1], line) == 0) {
+        app->history_cursor = app->history_len;
+        return 0;
+    }
+    if (app->history_len >= app->history_cap) {
+        size_t nc = app->history_cap ? app->history_cap * 2 : 64;
+        char **items = realloc(app->history, nc * sizeof(char *));
+        if (!items) return -1;
+        app->history = items;
+        app->history_cap = nc;
+    }
+    app->history[app->history_len] = strdup(line);
+    if (!app->history[app->history_len]) return -1;
+    app->history_len++;
+    app->history_cursor = app->history_len;
+    return 0;
+}
+
+static int history_path(char *out, size_t cap) {
+    char home[PATH_MAX];
+    if (session_store_home(home, sizeof home) != 0) return -1;
+    snprintf(out, cap, "%s/history", home);
+    return 0;
+}
+
+static void load_history(TuiApp *app) {
+    char path[PATH_MAX];
+    if (history_path(path, sizeof path) != 0) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
+        if (n > 0) history_append_item(app, line);
+    }
+    free(line);
+    fclose(f);
+    app->history_cursor = app->history_len;
+}
+
+static void persist_history_line(const char *line) {
+    if (!line || !*line) return;
+    char home[PATH_MAX];
+    if (session_store_home(home, sizeof home) != 0) return;
+    if (mkdir(home, 0700) != 0 && errno != EEXIST) return;
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/history", home);
+    FILE *f = fopen(path, "ab");
+    if (!f) return;
+    fprintf(f, "%s\n", line);
+    fclose(f);
+}
+
+static void free_history(TuiApp *app) {
+    for (size_t i = 0; i < app->history_len; i++) free(app->history[i]);
+    free(app->history);
+    app->history = NULL;
+    app->history_len = app->history_cap = app->history_cursor = 0;
 }
 
 static int model_match_append(TuiApp *app, size_t index) {
@@ -597,6 +809,9 @@ static void model_picker_select(TuiApp *app) {
     app->model_picker_open = 0;
 }
 
+static int effective_context_limit(const AgentConfig *cfg);
+static int effective_compaction_percent(const AgentConfig *cfg);
+
 static void add_wrapped(RenderLines *rl, EntryKind kind, const char *prefix,
                         const char *text, int width) {
     int content_width = width > 4 ? width - 4 : 1;
@@ -731,15 +946,48 @@ static void render_app(TuiApp *app) {
     print_repeated("─", app->width);
     printf("\x1b[0m\r\n");
 
-    char header[1024];
-    snprintf(header, sizeof header, " syscall-agent  %s  verbose:%s%s",
-        app->cfg->model ? app->cfg->model : "no-model",
-        tui_verbose_name(app->cfg->verbose),
-        app->running ? "  working" : "");
-    print_padded(header, app->width, ENTRY_ASSISTANT);
+    Buf header;
+    buf_init(&header);
+    buf_append_cstr(&header, " cezar");
+    if (app->cfg->statusline_model) {
+        buf_printf(&header, "  %s/%s",
+            app->cfg->provider ? app->cfg->provider : "openrouter",
+            app->cfg->model ? app->cfg->model : "no-model");
+    }
+    if (app->cfg->statusline_verbose) {
+        buf_printf(&header, "  verbose:%s", tui_verbose_name(app->cfg->verbose));
+    }
+    if (app->cfg->statusline_context) {
+        size_t tokens = agent_conversation_estimate_tokens(app->conversation);
+        int limit = effective_context_limit(app->cfg);
+        int pct = limit > 0 ? (int)((tokens * 100) / (size_t)limit) : 0;
+        buf_printf(&header, "  ctx:%zu/%d:%d%%", tokens, limit, pct);
+    }
+    if (app->cfg->statusline_session) {
+        buf_printf(&header, "  session:%s", app->session_id[0] ? app->session_id : "none");
+    }
+    if (app->running) buf_append_cstr(&header, "  working");
+    print_padded(header.data ? header.data : " cezar", app->width, ENTRY_ASSISTANT);
+    buf_free(&header);
     printf("\r\n");
 
-    int footer_lines = 3;
+    char **input_lines = NULL;
+    size_t input_line_count = 0;
+    if (app->model_picker_open) {
+        char query[512];
+        snprintf(query, sizeof query, "model search> %s", app->model_query);
+        input_line_count = tui_build_input_lines(query, app->width, &input_lines);
+    } else {
+        input_line_count = tui_build_input_lines(app->input, app->width, &input_lines);
+    }
+    int max_input_lines = app->height - 4;
+    if (max_input_lines < 1) max_input_lines = 1;
+    size_t visible_input_lines = input_line_count;
+    if (visible_input_lines > (size_t)max_input_lines) {
+        visible_input_lines = (size_t)max_input_lines;
+    }
+
+    int footer_lines = 2 + (int)visible_input_lines;
     int body_height = app->height - 2 - footer_lines;
     if (body_height < 1) body_height = 1;
 
@@ -775,13 +1023,14 @@ static void render_app(TuiApp *app) {
     print_padded(footer, app->width, ENTRY_SYSTEM);
     printf("\r\n");
 
-    char input_line[9000];
-    if (app->model_picker_open) {
-        snprintf(input_line, sizeof input_line, "model search> %s", app->model_query);
-    } else {
-        snprintf(input_line, sizeof input_line, "› %s", app->input);
+    size_t input_start = input_line_count > visible_input_lines
+        ? input_line_count - visible_input_lines
+        : 0;
+    for (size_t i = input_start; i < input_line_count; i++) {
+        print_padded(input_lines[i], app->width, ENTRY_ASSISTANT);
+        if (i + 1 < input_line_count) printf("\r\n");
     }
-    print_padded(input_line, app->width, ENTRY_ASSISTANT);
+    tui_free_lines(input_lines, input_line_count);
     fflush(stdout);
 }
 
@@ -820,8 +1069,8 @@ static void disable_raw(TuiApp *app) {
 }
 
 static void add_welcome(TuiApp *app) {
-    add_entry(app, ENTRY_SYSTEM, "pi-style tui",
-        "Type a prompt and press Enter. Commands: /model, /verbose normal|tools|reasoning|all, /new, /exit.");
+    add_entry(app, ENTRY_SYSTEM, "cezar",
+        "Type a prompt and press Enter. Commands: /model, /settings, /steer, /compact, /verbose normal|tools|reasoning|all, /new, /exit.");
 }
 
 static char *tools_text(const TuiApp *app) {
@@ -833,7 +1082,7 @@ static char *tools_text(const TuiApp *app) {
         "  save_memory, stat, list_dir, write_file, read_file_range,\n"
         "  auth_status, system_info, disk_usage, env_get, which, file_digest,\n"
         "  grep_text, list_skills, read_skill, dns_lookup, tcp_check, watch_path,\n"
-        "  list_processes,\n"
+        "  list_processes, list_extensions,\n"
         "  termux_info, termux_api_status, termux_storage_status,\n"
         "  termux_battery_status, termux_wifi_info, termux_clipboard_get,\n"
         "  termux_clipboard_set, termux_notification, termux_vibrate,\n"
@@ -842,11 +1091,11 @@ static char *tools_text(const TuiApp *app) {
         buf_append_cstr(&b,
             "\nExec tools enabled:\n"
             "  exec_command, spawn_bg, bg_read, bg_kill, bg_list,\n"
-            "  delegate_codex, delegate_copilot\n");
+            "  auth_login, delegate_codex, delegate_copilot, extension tools\n");
     } else {
         buf_append_cstr(&b,
             "\nExec tools disabled. Start with --allow-exec to expose exec_command,\n"
-            "spawn_bg, bg_read, bg_kill, and bg_list.\n");
+            "spawn_bg, bg_read, bg_kill, bg_list, auth_login, delegation, and extension tools.\n");
     }
     return b.data;
 }
@@ -871,19 +1120,19 @@ static char *skills_text(void) {
     Buf b;
     buf_init(&b);
     int any = 0;
-    const char *custom = getenv("SYSCALL_AGENT_SKILLS_DIR");
+    const char *custom = getenv("CEZAR_SKILLS_DIR");
     if (custom && *custom) append_skills_from_root(&b, custom, &any);
     append_skills_from_root(&b, "skills", &any);
     const char *home = getenv("HOME");
     if (home && *home) {
         char root[PATH_MAX];
-        snprintf(root, sizeof root, "%s/.syscall-agent/skills", home);
+        snprintf(root, sizeof root, "%s/.cezar/skills", home);
         append_skills_from_root(&b, root, &any);
     }
     if (!any) {
         buf_append_cstr(&b,
             "(no local skills found)\n"
-            "Checked SYSCALL_AGENT_SKILLS_DIR, ./skills, and ~/.syscall-agent/skills.\n");
+            "Checked CEZAR_SKILLS_DIR, ./skills, and ~/.cezar/skills.\n");
     }
     return b.data;
 }
@@ -891,7 +1140,8 @@ static char *skills_text(void) {
 static char *auth_text(void) {
     Buf b;
     buf_init(&b);
-    const char *provider = getenv_or("SYSCALL_AGENT_AUTH_PROVIDER", "openrouter");
+    const char *provider = getenv_or("CEZAR_AUTH_PROVIDER", "openrouter");
+    const char *model_provider = getenv_or("CEZAR_PROVIDER", "openrouter");
     const char *or_key = getenv("OPENROUTER_API_KEY");
     const char *oa_key = getenv("OPENAI_API_KEY");
     const char *gh = getenv("GH_TOKEN");
@@ -906,13 +1156,16 @@ static char *auth_text(void) {
     }
     buf_printf(&b,
         "provider: %s\n"
+        "model provider: %s\n"
         "OPENROUTER_API_KEY: %s\n"
         "OPENAI_API_KEY: %s\n"
         "Codex OAuth file: %s (%s)\n"
         "GitHub token hint: %s\n\n"
-        "Codex OAuth and Copilot subscription credentials are detected for visibility only;\n"
-        "syscall-agent does not print or repurpose those tokens.\n",
+        "Use /login codex to run codex --login, or /login copilot [host] to run copilot login.\n"
+        "Set CEZAR_PROVIDER=codex to use local Codex ChatGPT auth for model calls.\n"
+        "cezar does not print subscription tokens.\n",
         provider,
+        model_provider,
         (or_key && *or_key) ? "set" : "missing",
         (oa_key && *oa_key) ? "set" : "missing",
         codex,
@@ -939,6 +1192,209 @@ static char *sysinfo_text(void) {
     return b.data;
 }
 
+static int effective_context_limit(const AgentConfig *cfg) {
+    return cfg && cfg->context_limit > 0 ? cfg->context_limit : 128000;
+}
+
+static int effective_compaction_percent(const AgentConfig *cfg) {
+    return cfg && cfg->compaction_percent >= 50 ? cfg->compaction_percent : 75;
+}
+
+static void split_first_arg(const char *arg, char *first, size_t first_cap,
+                            char *rest, size_t rest_cap);
+
+static char *settings_text(TuiApp *app) {
+    Buf b;
+    buf_init(&b);
+    size_t approx_tokens = agent_conversation_estimate_tokens(app->conversation);
+    int context_limit = effective_context_limit(app->cfg);
+    int pct = context_limit > 0 ? (int)((approx_tokens * 100) / (size_t)context_limit) : 0;
+    buf_printf(&b,
+        "model: %s\n"
+        "provider: %s\n"
+        "verbose: %s\n"
+        "messages: %d\n"
+        "context: approx %zu / %d tokens (%d%%)\n"
+        "compaction threshold: %d%%\n"
+        "compaction model: %s\n"
+        "statusline model: %s\n"
+        "statusline context: %s\n"
+        "statusline session: %s\n"
+        "statusline verbose: %s\n\n"
+        "Commands:\n"
+        "  /settings statusline model|context|session|verbose on|off\n"
+        "  /compact 50..95\n",
+        app->cfg->model ? app->cfg->model : "no-model",
+        app->cfg->provider ? app->cfg->provider : "openrouter",
+        tui_verbose_name(app->cfg->verbose),
+        agent_conversation_message_count(app->conversation),
+        approx_tokens,
+        context_limit,
+        pct,
+        effective_compaction_percent(app->cfg),
+        app->cfg->compaction_model ? app->cfg->compaction_model : app->cfg->model,
+        app->cfg->statusline_model ? "on" : "off",
+        app->cfg->statusline_context ? "on" : "off",
+        app->cfg->statusline_session ? "on" : "off",
+        app->cfg->statusline_verbose ? "on" : "off");
+    return b.data;
+}
+
+static int parse_on_off(const char *s, int *out) {
+    if (strcmp(s, "on") == 0 || strcmp(s, "true") == 0 || strcmp(s, "1") == 0) {
+        *out = 1;
+        return 1;
+    }
+    if (strcmp(s, "off") == 0 || strcmp(s, "false") == 0 || strcmp(s, "0") == 0) {
+        *out = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static void handle_settings_command(TuiApp *app, const char *arg) {
+    char a[64], b[64], c[64];
+    split_first_arg(arg, a, sizeof a, b, sizeof b);
+    if (!a[0]) {
+        char *s = settings_text(app);
+        add_entry(app, ENTRY_SYSTEM, "settings", s ? s : "");
+        free(s);
+        return;
+    }
+    if (strcmp(a, "statusline") == 0) {
+        char key[64], value[64];
+        split_first_arg(b, key, sizeof key, value, sizeof value);
+        int enabled = 0;
+        if (!key[0] || !parse_on_off(value, &enabled)) {
+            add_entry(app, ENTRY_ERROR, "settings",
+                "usage: /settings statusline model|context|session|verbose on|off");
+            return;
+        }
+        if (strcmp(key, "model") == 0) app->cfg->statusline_model = enabled;
+        else if (strcmp(key, "context") == 0) app->cfg->statusline_context = enabled;
+        else if (strcmp(key, "session") == 0) app->cfg->statusline_session = enabled;
+        else if (strcmp(key, "verbose") == 0) app->cfg->statusline_verbose = enabled;
+        else {
+            add_entry(app, ENTRY_ERROR, "settings",
+                "unknown statusline field; use model, context, session, or verbose");
+            return;
+        }
+        snprintf(c, sizeof c, "statusline %s %s", key, enabled ? "on" : "off");
+        add_entry(app, ENTRY_SYSTEM, "settings", c);
+        snprintf(app->status, sizeof app->status, "%s", c);
+        return;
+    }
+    add_entry(app, ENTRY_ERROR, "settings",
+        "usage: /settings or /settings statusline model|context|session|verbose on|off");
+}
+
+static const char *basename_of_cwd(void) {
+    static char name[256];
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof cwd)) {
+        snprintf(name, sizeof name, "session");
+        return name;
+    }
+    const char *slash = strrchr(cwd, '/');
+    const char *base = slash && slash[1] ? slash + 1 : cwd;
+    snprintf(name, sizeof name, "%s", *base ? base : "session");
+    return name;
+}
+
+static void save_current_session(TuiApp *app) {
+    if (!app->session_id[0] || !app->conversation) return;
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof cwd)) snprintf(cwd, sizeof cwd, ".");
+    char *json = agent_conversation_to_json(app->conversation);
+    if (!json) return;
+    session_store_save(app->session_id,
+        app->session_name[0] ? app->session_name : "untitled",
+        cwd,
+        json);
+    free(json);
+}
+
+static void create_tui_session(TuiApp *app, const char *name) {
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof cwd)) snprintf(cwd, sizeof cwd, ".");
+    const char *session_name = name && *name ? name : basename_of_cwd();
+    snprintf(app->session_name, sizeof app->session_name, "%s", session_name);
+    if (session_store_create(app->session_name, cwd,
+            app->session_id, sizeof app->session_id) != 0) {
+        app->session_id[0] = '\0';
+        snprintf(app->status, sizeof app->status, "session store unavailable");
+    }
+}
+
+static void split_first_arg(const char *arg, char *first, size_t first_cap,
+                            char *rest, size_t rest_cap) {
+    if (first && first_cap) first[0] = '\0';
+    if (rest && rest_cap) rest[0] = '\0';
+    const char *p = skip_spaces(arg ? arg : "");
+    const char *start = p;
+    while (*p && !isspace((unsigned char)*p)) p++;
+    if (first && first_cap && p > start) {
+        size_t n = (size_t)(p - start);
+        if (n >= first_cap) n = first_cap - 1;
+        memcpy(first, start, n);
+        first[n] = '\0';
+    }
+    p = skip_spaces(p);
+    if (rest && rest_cap && *p) snprintf(rest, rest_cap, "%s", p);
+}
+
+static void run_login_command(TuiApp *app, const char *arg) {
+    char provider[64], host[256];
+    split_first_arg(arg, provider, sizeof provider, host, sizeof host);
+    if (!provider[0]) {
+        add_entry(app, ENTRY_ERROR, "login", "usage: /login codex|copilot [host]");
+        return;
+    }
+    disable_raw(app);
+    printf("\nRunning auth login. Follow the browser/device-code prompt, then return here.\n\n");
+    fflush(stdout);
+    int rc = auth_login_interactive(provider, host[0] ? host : NULL, 0);
+    printf("\nAuth command exited with rc=%d. Press Enter to return to cezar.", rc);
+    fflush(stdout);
+    int ch;
+    while ((ch = getchar()) != '\n' && ch != EOF) {}
+    if (enable_raw(app) != 0) {
+        app->should_exit = 1;
+        return;
+    }
+    char msg[160];
+    snprintf(msg, sizeof msg, "login command for %s exited rc=%d", provider, rc);
+    add_entry(app, rc == 0 ? ENTRY_SYSTEM : ENTRY_ERROR, "login", msg);
+    snprintf(app->status, sizeof app->status, "%s", msg);
+}
+
+static void resume_session(TuiApp *app, const char *uuid) {
+    if (!uuid || !*uuid) {
+        char *list = session_store_list_text();
+        add_entry(app, ENTRY_SYSTEM, "sessions", list ? list : "");
+        free(list);
+        return;
+    }
+    char *json = session_store_load_conversation(uuid);
+    if (!json) {
+        add_entry(app, ENTRY_ERROR, "resume", "session not found or unreadable");
+        return;
+    }
+    AgentConversation *next = agent_conversation_from_json(app->cfg, json);
+    free(json);
+    if (!next) {
+        add_entry(app, ENTRY_ERROR, "resume", "could not restore session");
+        return;
+    }
+    agent_conversation_free(app->conversation);
+    app->conversation = next;
+    snprintf(app->session_id, sizeof app->session_id, "%s", uuid);
+    clear_entries(app);
+    add_welcome(app);
+    add_entry(app, ENTRY_SYSTEM, "resume", uuid);
+    snprintf(app->status, sizeof app->status, "resumed %s", uuid);
+}
+
 static void handle_command(TuiApp *app, const char *line) {
     TuiCommand cmd;
     if (!tui_parse_command(line, &cmd)) return;
@@ -946,6 +1402,8 @@ static void handle_command(TuiApp *app, const char *line) {
     if (cmd.type == TUI_CMD_NEW) {
         clear_entries(app);
         agent_conversation_reset(app->conversation, app->cfg);
+        create_tui_session(app, basename_of_cwd());
+        save_current_session(app);
         add_welcome(app);
         snprintf(app->status, sizeof app->status, "new session");
     } else if (cmd.type == TUI_CMD_EXIT) {
@@ -959,10 +1417,16 @@ static void handle_command(TuiApp *app, const char *line) {
             "/verbose tools shows tool calls and tool output.\n"
             "/verbose reasoning shows model reasoning fields when returned.\n"
             "/verbose all shows tools and reasoning.\n"
+            "/steer INSTRUCTION interrupts the active run and restarts with your steering note.\n"
+            "/settings shows runtime settings; /settings statusline FIELD on|off changes the statusline.\n"
+            "/compact 50..95 sets the context compaction threshold.\n"
             "/tools lists available tool families.\n"
             "/skills lists local skill packs.\n"
+            "/extensions lists extension manifests and registered extension tools.\n"
             "/auth shows configured auth surfaces without secrets.\n"
+            "/login codex|copilot [host] runs the supported browser/device-code login flow.\n"
             "/sysinfo shows host and working-directory information.\n"
+            "/sessions lists saved sessions. /resume UUID switches context. /rename NAME renames this session.\n"
             "/new clears the visible transcript. /exit leaves the TUI.");
     } else if (cmd.type == TUI_CMD_MODELS) {
         open_model_picker(app);
@@ -978,6 +1442,26 @@ static void handle_command(TuiApp *app, const char *line) {
         char *a = auth_text();
         add_entry(app, ENTRY_SYSTEM, "auth", a ? a : "");
         free(a);
+    } else if (cmd.type == TUI_CMD_LOGIN) {
+        run_login_command(app, cmd.arg);
+    } else if (cmd.type == TUI_CMD_SESSIONS) {
+        char *s = session_store_list_text();
+        add_entry(app, ENTRY_SYSTEM, "sessions", s ? s : "");
+        free(s);
+    } else if (cmd.type == TUI_CMD_RESUME) {
+        resume_session(app, cmd.arg);
+    } else if (cmd.type == TUI_CMD_RENAME) {
+        if (app->session_id[0] && session_store_rename(app->session_id, cmd.arg) == 0) {
+            snprintf(app->session_name, sizeof app->session_name, "%s", cmd.arg);
+            add_entry(app, ENTRY_SYSTEM, "session", "renamed current session");
+            snprintf(app->status, sizeof app->status, "renamed session");
+        } else {
+            add_entry(app, ENTRY_ERROR, "session", "could not rename current session");
+        }
+    } else if (cmd.type == TUI_CMD_EXTENSIONS) {
+        char *e = extensions_list_text();
+        add_entry(app, ENTRY_SYSTEM, "extensions", e ? e : "");
+        free(e);
     } else if (cmd.type == TUI_CMD_SYSINFO) {
         char *s = sysinfo_text();
         add_entry(app, ENTRY_SYSTEM, "system", s ? s : "");
@@ -990,6 +1474,16 @@ static void handle_command(TuiApp *app, const char *line) {
         snprintf(msg, sizeof msg, "verbose set to %s", tui_verbose_name(app->cfg->verbose));
         add_entry(app, ENTRY_SYSTEM, "verbose", msg);
         snprintf(app->status, sizeof app->status, "%s", msg);
+    } else if (cmd.type == TUI_CMD_SETTINGS) {
+        handle_settings_command(app, cmd.arg);
+    } else if (cmd.type == TUI_CMD_COMPACT) {
+        app->cfg->compaction_percent = cmd.percent;
+        char msg[128];
+        snprintf(msg, sizeof msg, "compaction threshold set to %d%%", cmd.percent);
+        add_entry(app, ENTRY_SYSTEM, "compact", msg);
+        snprintf(app->status, sizeof app->status, "%s", msg);
+    } else if (cmd.type == TUI_CMD_STEER) {
+        add_entry(app, ENTRY_ERROR, "steer", "/steer only applies while a run is active");
     } else {
         add_entry(app, ENTRY_ERROR, "command", cmd.error ? cmd.error : "unknown command");
     }
@@ -998,6 +1492,7 @@ static void handle_command(TuiApp *app, const char *line) {
 static void on_agent_event(const AgentEvent *event, void *userdata) {
     TuiApp *app = userdata;
     if (!event) return;
+    pthread_mutex_lock(&app->ui_lock);
 
     switch (event->type) {
         case AGENT_EVENT_STATUS:
@@ -1029,6 +1524,145 @@ static void on_agent_event(const AgentEvent *event, void *userdata) {
             break;
     }
     render_app(app);
+    pthread_mutex_unlock(&app->ui_lock);
+}
+
+static int tui_agent_should_cancel(void *userdata) {
+    TuiApp *app = userdata;
+    return app && app->cancel_requested;
+}
+
+static void request_stop_locked(TuiApp *app, const char *reason) {
+    if (!app->running) return;
+    app->cancel_requested = 1;
+    snprintf(app->status, sizeof app->status, "%s", reason ? reason : "stopping");
+}
+
+static void set_pending_steer_locked(TuiApp *app, const char *text) {
+    if (!text || !*text) return;
+    free(app->steer_text);
+    Buf b;
+    buf_init(&b);
+    buf_append_cstr(&b, "Steering update for the interrupted run:\n");
+    buf_append_cstr(&b, text);
+    app->steer_text = b.data;
+    app->cancel_requested = 1;
+    add_entry(app, ENTRY_USER, "steer", text);
+    snprintf(app->status, sizeof app->status, "steering update queued");
+}
+
+static void *agent_worker_main(void *userdata) {
+    AgentRunTask *task = userdata;
+    TuiApp *app = task->app;
+    char *prompt = task->prompt;
+    free(task);
+
+    while (prompt) {
+        int rc = agent_conversation_run_with_events(
+            app->conversation, app->cfg, prompt, on_agent_event, app);
+        free(prompt);
+        prompt = NULL;
+
+        pthread_mutex_lock(&app->ui_lock);
+        if (app->steer_text) {
+            prompt = app->steer_text;
+            app->steer_text = NULL;
+            app->cancel_requested = 0;
+            add_entry(app, ENTRY_SYSTEM, "steer", "restarting with steering update");
+            snprintf(app->status, sizeof app->status, "restarting with steering update");
+            render_app(app);
+            pthread_mutex_unlock(&app->ui_lock);
+            continue;
+        }
+
+        app->running = 0;
+        app->worker_done = 1;
+        if (rc == 0) {
+            snprintf(app->status, sizeof app->status, "ready");
+        } else if (rc == 130 || app->cancel_requested) {
+            snprintf(app->status, sizeof app->status, "stopped");
+            app->cancel_requested = 0;
+        } else {
+            snprintf(app->status, sizeof app->status, "agent exited with rc=%d", rc);
+        }
+        save_current_session(app);
+        render_app(app);
+        pthread_mutex_unlock(&app->ui_lock);
+    }
+    return NULL;
+}
+
+static void join_finished_worker(TuiApp *app) {
+    if (app->worker_started && app->worker_done) {
+        pthread_join(app->worker, NULL);
+        app->worker_started = 0;
+        app->worker_done = 0;
+    }
+}
+
+static void start_agent_run_locked(TuiApp *app, const char *prompt) {
+    if (app->running) {
+        add_entry(app, ENTRY_ERROR, "busy", "run already active; use /steer, /verbose, /settings, /compact, Esc, or Ctrl-C");
+        return;
+    }
+    join_finished_worker(app);
+
+    AgentRunTask *task = calloc(1, sizeof *task);
+    if (!task) {
+        add_entry(app, ENTRY_ERROR, "agent", "could not allocate run task");
+        return;
+    }
+    task->app = app;
+    task->prompt = strdup(prompt ? prompt : "");
+    if (!task->prompt) {
+        free(task);
+        add_entry(app, ENTRY_ERROR, "agent", "could not allocate prompt");
+        return;
+    }
+
+    add_entry(app, ENTRY_USER, "user", prompt);
+    app->running = 1;
+    app->cancel_requested = 0;
+    app->worker_done = 0;
+    snprintf(app->status, sizeof app->status, "working");
+    if (pthread_create(&app->worker, NULL, agent_worker_main, task) != 0) {
+        app->running = 0;
+        free(task->prompt);
+        free(task);
+        add_entry(app, ENTRY_ERROR, "agent", "could not start worker thread");
+        snprintf(app->status, sizeof app->status, "worker start failed");
+        return;
+    }
+    app->worker_started = 1;
+}
+
+static void handle_live_command_locked(TuiApp *app, const char *line) {
+    TuiCommand cmd;
+    if (!tui_parse_command(line, &cmd)) return;
+
+    if (cmd.type == TUI_CMD_STEER) {
+        set_pending_steer_locked(app, cmd.arg);
+    } else if (cmd.type == TUI_CMD_VERBOSE) {
+        app->cfg->verbose = cmd.verbose_mode;
+        char msg[128];
+        snprintf(msg, sizeof msg, "verbose set to %s", tui_verbose_name(app->cfg->verbose));
+        add_entry(app, ENTRY_SYSTEM, "verbose", msg);
+        snprintf(app->status, sizeof app->status, "%s", msg);
+    } else if (cmd.type == TUI_CMD_SETTINGS) {
+        handle_settings_command(app, cmd.arg);
+    } else if (cmd.type == TUI_CMD_COMPACT) {
+        app->cfg->compaction_percent = cmd.percent;
+        char msg[128];
+        snprintf(msg, sizeof msg, "compaction threshold set to %d%%", cmd.percent);
+        add_entry(app, ENTRY_SYSTEM, "compact", msg);
+        snprintf(app->status, sizeof app->status, "%s", msg);
+    } else if (cmd.type == TUI_CMD_EXIT) {
+        request_stop_locked(app, "stopping before exit");
+        app->should_exit = 1;
+    } else {
+        add_entry(app, ENTRY_ERROR, "busy",
+            "while running, use /steer, /verbose, /settings, /compact, Esc, or Ctrl-C");
+    }
 }
 
 static void submit_line(TuiApp *app) {
@@ -1044,23 +1678,25 @@ static void submit_line(TuiApp *app) {
         return;
     }
 
+    history_append_item(app, trimmed);
+    persist_history_line(trimmed);
+
     if (*trimmed == '/') {
-        handle_command(app, trimmed);
+        if (app->running) {
+            handle_live_command_locked(app, trimmed);
+        } else {
+            handle_command(app, trimmed);
+        }
+        save_current_session(app);
         free(line);
         return;
     }
 
-    add_entry(app, ENTRY_USER, "user", trimmed);
-    app->running = 1;
-    snprintf(app->status, sizeof app->status, "working");
-    render_app(app);
-    int rc = agent_conversation_run_with_events(
-        app->conversation, app->cfg, trimmed, on_agent_event, app);
-    app->running = 0;
-    if (rc == 0) {
-        snprintf(app->status, sizeof app->status, "ready");
+    if (app->running) {
+        add_entry(app, ENTRY_ERROR, "busy",
+            "run already active; use /steer INSTRUCTION to redirect it");
     } else {
-        snprintf(app->status, sizeof app->status, "agent exited with rc=%d", rc);
+        start_agent_run_locked(app, trimmed);
     }
     free(line);
 }
@@ -1180,6 +1816,17 @@ int tui_run(AgentConfig *cfg) {
     TuiApp app;
     memset(&app, 0, sizeof app);
     app.cfg = cfg;
+    if (cfg->context_limit <= 0) cfg->context_limit = 128000;
+    if (cfg->compaction_percent <= 0) cfg->compaction_percent = 75;
+    if (!cfg->compaction_model) cfg->compaction_model = cfg->model;
+    if (!cfg->compaction_prompt) {
+        cfg->compaction_prompt =
+            "Summarize the conversation so far for a coding agent. Preserve user goals, "
+            "decisions, files changed, commands run, errors, and unresolved next steps.";
+    }
+    cfg->should_cancel = tui_agent_should_cancel;
+    cfg->cancel_userdata = &app;
+    pthread_mutex_init(&app.ui_lock, NULL);
     openrouter_model_catalog_init(&app.model_catalog);
     snprintf(app.status, sizeof app.status, "ready");
     app.conversation = agent_conversation_new(cfg);
@@ -1187,9 +1834,14 @@ int tui_run(AgentConfig *cfg) {
         fprintf(stderr, "ERROR: could not initialize TUI conversation\n");
         return 2;
     }
+    load_history(&app);
+    create_tui_session(&app, basename_of_cwd());
+    save_current_session(&app);
 
     if (enable_raw(&app) != 0) {
         agent_conversation_free(app.conversation);
+        free_history(&app);
+        pthread_mutex_destroy(&app.ui_lock);
         return 2;
     }
     signal(SIGWINCH, on_sigwinch);
@@ -1197,7 +1849,11 @@ int tui_run(AgentConfig *cfg) {
     render_app(&app);
 
     while (!app.should_exit) {
-        if (g_resize_pending) render_app(&app);
+        if (g_resize_pending) {
+            pthread_mutex_lock(&app.ui_lock);
+            render_app(&app);
+            pthread_mutex_unlock(&app.ui_lock);
+        }
         unsigned char ch = 0;
         ssize_t n = read(STDIN_FILENO, &ch, 1);
         if (n < 0) {
@@ -1206,21 +1862,61 @@ int tui_run(AgentConfig *cfg) {
         }
         if (n == 0) continue;
 
+        pthread_mutex_lock(&app.ui_lock);
         if (app.model_picker_open) {
             handle_model_picker_byte(&app, ch);
-        } else if (ch == 3 || ch == 4) {
+        } else if (ch == 3) {
+            if (app.running) {
+                request_stop_locked(&app, "stopping");
+            } else {
+                app.should_exit = 1;
+            }
+        } else if (ch == 4) {
             app.should_exit = 1;
-        } else if (ch == '\r' || ch == '\n') {
+        } else if (ch == '\r') {
             submit_line(&app);
+        } else if (ch == '\n') {
+            if (app.input_len + 1 < sizeof app.input) {
+                app.input[app.input_len++] = '\n';
+                app.input[app.input_len] = '\0';
+            }
         } else if (ch == 127 || ch == 8) {
             if (app.input_len > 0) app.input[--app.input_len] = '\0';
         } else if (ch == 27) {
-            (void)read_escape_key();
+            TuiKey key = read_escape_key();
+            if (key == TUI_KEY_UP || key == TUI_KEY_DOWN) {
+                if (tui_history_apply((const char *const *)app.history,
+                        app.history_len,
+                        key == TUI_KEY_UP ? -1 : 1,
+                        &app.history_cursor,
+                        app.input,
+                        sizeof app.input)) {
+                    app.input_len = strlen(app.input);
+                }
+            } else if (key == TUI_KEY_ESC) {
+                if (app.running) {
+                    request_stop_locked(&app, "stopping");
+                } else {
+                    app.input_len = 0;
+                    app.input[0] = '\0';
+                    snprintf(app.status, sizeof app.status, "ready");
+                }
+            }
         } else if (isprint(ch) && app.input_len + 1 < sizeof app.input) {
             app.input[app.input_len++] = (char)ch;
             app.input[app.input_len] = '\0';
         }
         render_app(&app);
+        join_finished_worker(&app);
+        pthread_mutex_unlock(&app.ui_lock);
+    }
+
+    pthread_mutex_lock(&app.ui_lock);
+    if (app.running) request_stop_locked(&app, "stopping");
+    pthread_mutex_unlock(&app.ui_lock);
+    if (app.worker_started) {
+        pthread_join(app.worker, NULL);
+        app.worker_started = 0;
     }
 
     disable_raw(&app);
@@ -1229,5 +1925,8 @@ int tui_run(AgentConfig *cfg) {
     free(app.owned_model_id);
     agent_conversation_free(app.conversation);
     free_entries(&app);
+    free_history(&app);
+    free(app.steer_text);
+    pthread_mutex_destroy(&app.ui_lock);
     return 0;
 }

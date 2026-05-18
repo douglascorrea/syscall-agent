@@ -93,7 +93,7 @@ int main(void) {
     cJSON *messages = cJSON_CreateArray();
     cJSON *tools = cJSON_CreateArray();
     cJSON *resp = openrouter_chat_stream(
-        "test-key", "test/model", messages, tools, 1, record_stream, NULL);
+        "test-key", "test/model", messages, tools, 1, record_stream, NULL, NULL, NULL);
     if (!resp) {
         fprintf(stderr, "openrouter_chat_stream returned NULL\n");
         return 1;

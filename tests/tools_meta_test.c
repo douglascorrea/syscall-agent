@@ -31,6 +31,14 @@ static void expect_contains(const char *name, const char *got, const char *want)
     }
 }
 
+static void expect_not_contains(const char *name, const char *got, const char *bad) {
+    if (got && strstr(got, bad)) {
+        fprintf(stderr, "%s: got '%s', unexpected substring '%s'\n",
+            name, got, bad);
+        exit(1);
+    }
+}
+
 static void test_list_tools_includes_meta_tools(void) {
     ToolCtx ctx = {0};
     char *result = tools_dispatch(&ctx, "list_tools", NULL);
@@ -49,6 +57,7 @@ static void test_delegate_tools_are_gated(void) {
     char *result = tools_dispatch(&ctx, "list_tools", NULL);
     expect_contains("delegate codex listed", result, "delegate_codex");
     expect_contains("delegate copilot listed", result, "delegate_copilot");
+    expect_contains("auth login listed", result, "auth_login");
     free(result);
 
     cJSON *args = cJSON_Parse("{\"prompt\":\"hi\",\"mode\":\"workspace-write\"}");
@@ -56,6 +65,35 @@ static void test_delegate_tools_are_gated(void) {
     expect_contains("delegate codex unsafe gate", result, "requires --allow-unsafe-exec");
     free(result);
     cJSON_Delete(args);
+}
+
+static void test_auth_login_dry_run_commands(void) {
+    ToolCtx ctx = { .allow_exec = 1 };
+
+    cJSON *args = cJSON_Parse("{\"provider\":\"codex\",\"dry_run\":true}");
+    char *result = tools_dispatch(&ctx, "auth_login", args);
+    expect_contains("codex login dry run", result, "codex --login");
+    free(result);
+    cJSON_Delete(args);
+
+    args = cJSON_Parse("{\"provider\":\"copilot\",\"host\":\"example.ghe.com\",\"dry_run\":true}");
+    result = tools_dispatch(&ctx, "auth_login", args);
+    expect_contains("copilot login dry run", result, "copilot login --host example.ghe.com");
+    free(result);
+    cJSON_Delete(args);
+}
+
+static void test_auth_status_uses_cezar_branding(void) {
+    setenv("CEZAR_AUTH_PROVIDER", "cezar-test", 1);
+    setenv("CEZAR_PROVIDER", "codex", 1);
+
+    char *result = tools_dispatch(NULL, "auth_status", NULL);
+    expect_contains("auth status provider", result, "provider=cezar-test");
+    expect_contains("auth status model provider", result, "model_provider: codex");
+    expect_contains("auth status env", result, "CEZAR_PROVIDER=codex");
+    expect_not_contains("auth status old env", result, "SYSCALL" "_AGENT");
+    expect_not_contains("auth status old name", result, "syscall" "-agent");
+    free(result);
 }
 
 static void test_env_get_redacts_secret_values(void) {
@@ -82,6 +120,8 @@ static void test_file_digest_reports_algorithm(void) {
 int main(void) {
     test_list_tools_includes_meta_tools();
     test_delegate_tools_are_gated();
+    test_auth_login_dry_run_commands();
+    test_auth_status_uses_cezar_branding();
     test_env_get_redacts_secret_values();
     test_file_digest_reports_algorithm();
     return 0;
